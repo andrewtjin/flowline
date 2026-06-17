@@ -1,0 +1,14 @@
+# dependencies & build output
+node_modules/
+dist/
+out/
+.vite/
+*.tsbuildinfo
+
+# local scratch (never tracked)
+tasks/
+
+# misc
+*.log
+.DS_Store
+Thumbs.db

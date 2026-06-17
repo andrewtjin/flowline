@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Flowline</title>
+  </head>
+  <body>
+    <div id="fl-root" class="fl-shell">
+      <header class="fl-topbar"><span class="fl-brand">Flowline</span></header>
+      <!-- The topbar sits OVER a horizontal row. The sidebar (mounted by renderer/main.ts) is the
+           left column; the editor surface + the bottom strip are the right column. .fl-shell stays a flex
+           column; .fl-main-row is the flex row. #app and .fl-surface are UNCHANGED (centered editor). -->
+      <div class="fl-main-row">
+        <div class="fl-content-col">
+          <main id="app" class="fl-surface"></main>
+          <!-- The thin bottom strip with the sidebar-toggle button (a sibling of the surface, NOT inside it). -->
+          <div class="fl-strip">
+            <button type="button" class="fl-strip-toggle" id="fl-sidebar-toggle" aria-label="Toggle sidebar" title="Toggle sidebar">☰</button>
+          </div>
+        </div>
+      </div>
+    </div>
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>

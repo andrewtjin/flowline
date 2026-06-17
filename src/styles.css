@@ -1,0 +1,371 @@
+/* styles.css — Flowline visual layer. All author classes are `fl-` prefixed (CI-gated).
+   Highlight colors are CSS vars a viewer can override; mark visuals match the spec:
+   highlight = background color, emphasis = bold+underline+box, muted = small font, analytic = dark blue. */
+
+:root {
+  /* Highlight palette (keyed by the OOXML color name stored on each highlight mark) — MS Word
+     highlighter defaults, tuned for legibility under black text:
+       yellow = #FFFF00  Word "Yellow" exactly (was too orange).
+       green  = #22FF22  Word "Bright Green" is #00FF00; nudged up one notch so it reads clearly green
+                         without the pure-#00FF00 vibration, while staying legible under black text.
+       blue   = #4DB6FF  highlighter azure — bright & light like the yellow but unmistakably blue, and
+                         legible under black text. (Pure Word blue read as dark navy on this renderer;
+                         this is the "back to azure / highlighter blue" the user asked for — tweak this var.)
+       gray   = #dfe3e8  unchanged. */
+  --fl-color-blue: #4db6ff;
+  --fl-color-yellow: #ffff00;
+  --fl-color-green: #22ff22;
+  --fl-color-gray: #dfe3e8;
+
+  /* Surface tokens. */
+  --fl-bg: #f6f7f9;
+  --fl-panel: #ffffff;
+  --fl-ink: #1c1f24;
+  --fl-ink-soft: #5b626c;
+  --fl-accent: #2b59ff;
+  --fl-analytic-ink: #1b3a8f;
+  --fl-line: #e6e8ec;
+  /* Type scale: absolute pt so editor and .docx export match exactly.
+     muted uses pt too — 8pt is always 8pt regardless of which block it sits inside. */
+  --fl-muted-size: 8pt;
+
+  --fl-radius: 10px;
+  /* A system SANS stack — nothing must render serif. system-ui first so each OS uses its native
+     UI sans (Segoe UI on Windows, San Francisco on macOS), with explicit fallbacks and a final
+     sans-serif keyword so a missing font never falls back to the serif default. */
+  --fl-font: system-ui, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
+
+* { box-sizing: border-box; }
+
+html, body { height: 100%; overflow: hidden; } /* the app never page-scrolls (only the editor surface does) */
+
+body {
+  margin: 0;
+  background: var(--fl-bg);
+  color: var(--fl-ink);
+  font-family: var(--fl-font);
+  font-size: 16px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ── App shell ───────────────────────────────────────────────────────────── */
+/* The shell is locked to the viewport height — the app NEVER page-scrolls; only the editor surface scrolls
+   internally (see .fl-surface). This keeps the topbar, sidebar, and bottom strip fixed in place. */
+.fl-shell { display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
+
+.fl-topbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 18px;
+  background: var(--fl-panel);
+  border-bottom: 1px solid var(--fl-line);
+  position: sticky;
+  top: 0;
+  z-index: 10;
+}
+.fl-brand { font-weight: 700; letter-spacing: 0.2px; }
+.fl-brand::before { content: ""; }
+
+/* ── Mark toolbar ────────────────────────────────────────────────────────────
+   Sits at the right of the topbar: four colour swatches, then emphasis + muted. */
+.fl-toolbar { display: flex; align-items: center; gap: 12px; margin-left: auto; }
+.fl-tool-group { display: flex; align-items: center; gap: 7px; }
+
+.fl-swatch {
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border-radius: 50%;
+  border: 2px solid rgba(16, 24, 40, 0.14);
+  background: var(--fl-color-yellow);
+  cursor: pointer;
+  transition: transform 0.08s ease, box-shadow 0.1s ease;
+}
+.fl-swatch:hover { transform: scale(1.14); }
+.fl-swatch[data-color="blue"] { background: var(--fl-color-blue); }
+.fl-swatch[data-color="yellow"] { background: var(--fl-color-yellow); }
+.fl-swatch[data-color="green"] { background: var(--fl-color-green); }
+.fl-swatch[data-color="lightGray"] { background: var(--fl-color-gray); }
+.fl-swatch.fl-active { box-shadow: 0 0 0 2px var(--fl-panel), 0 0 0 4px var(--fl-accent); }
+
+.fl-tool {
+  font: inherit;
+  font-size: 0.82em;
+  line-height: 1;
+  padding: 6px 11px;
+  border-radius: 7px;
+  border: 1px solid var(--fl-line);
+  background: var(--fl-panel);
+  color: var(--fl-ink);
+  cursor: pointer;
+  transition: background 0.08s ease, border-color 0.08s ease, color 0.08s ease;
+}
+.fl-tool:hover { border-color: var(--fl-accent); }
+.fl-tool.fl-active { background: var(--fl-accent); border-color: var(--fl-accent); color: #fff; }
+.fl-tool-emphasis { font-weight: 700; text-decoration: underline; }
+.fl-tool-strong { font-weight: 700; } /* the "B" button reads bold */
+
+/* The editor surface is the SINGLE scroll region — the shell itself never scrolls, so the topbar/sidebar/
+   strip stay put while a long document scrolls here. `min-height: 0` lets this flex child shrink below its
+   content so `overflow-y` actually engages (without it, a flex item grows to fit content and never scrolls).
+   FULL-BLEED: a flex COLUMN (not a centered row) with zero gutter, so the editable stretches edge-to-edge and
+   spends ALL non-pane space — no centered fixed-width "page". The editable fills the column's full height too
+   (short doc → the whole area is clickable; long doc → it grows past the surface, which then scrolls). The
+   document's only inset is .ProseMirror's own padding, not an outer gutter. */
+.fl-surface { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; padding: 0; }
+
+/* ── Shell row + sidebar + bottom strip (ADDITIVE-ONLY) ──────────────────────────────────────────────
+   .fl-main-row is the horizontal band under the topbar: [sidebar | content column]. The content column
+   stacks the centered editor surface over the thin bottom strip. The rules above (html,body / body /
+   .fl-surface / .ProseMirror) are untouched by these additive shell classes. */
+.fl-main-row { display: flex; flex: 1; min-height: 0; }
+.fl-content-col { display: flex; flex-direction: column; flex: 1; min-width: 0; min-height: 0; }
+
+/* The sidebar: a fixed-width left column with a tab header over two stacked panes. `.fl-hidden` collapses
+   it (the strip toggle / View menu flip it) without removing it from the tree. */
+.fl-sidebar {
+  --fl-sidebar-w: 220px; /* default width (was 260 — "too wide"); the drag handle overrides + persists this */
+  display: flex;
+  flex-direction: column;
+  width: var(--fl-sidebar-w);
+  flex: 0 0 var(--fl-sidebar-w);
+  position: relative; /* anchor the absolute resize handle */
+  background: var(--fl-panel);
+  border-right: 1px solid var(--fl-line);
+  overflow: hidden;
+}
+.fl-sidebar.fl-hidden { display: none; }
+
+/* Drag-to-resize handle overlaying the sidebar's right edge; a thin invisible strip that lights up on hover. */
+.fl-sidebar-resizer {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 6px;
+  cursor: col-resize;
+  background: transparent;
+}
+.fl-sidebar-resizer:hover { background: var(--fl-accent); opacity: 0.3; }
+
+/* Tab header — two equal-width buttons; the active one reads accented. */
+.fl-sidebar-tabs { display: flex; border-bottom: 1px solid var(--fl-line); }
+.fl-sidebar-tab {
+  flex: 1;
+  font: inherit;
+  font-size: 0.82em;
+  padding: 9px 8px;
+  border: none;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: var(--fl-ink-soft);
+  cursor: pointer;
+  transition: color 0.08s ease, border-color 0.08s ease;
+}
+.fl-sidebar-tab:hover { color: var(--fl-ink); }
+.fl-sidebar-tab.fl-active { color: var(--fl-accent); border-bottom-color: var(--fl-accent); }
+
+/* Panes: only the active one shows. Each scrolls independently when its list overflows. */
+.fl-sidebar-pane { display: none; flex: 1; overflow-y: auto; padding: 8px 6px; }
+.fl-sidebar-pane.fl-active { display: block; }
+
+/* Documents pane: full-width clickable rows, a ● marker column + the title. */
+.fl-doc-entry {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  font: inherit;
+  font-size: 0.86em;
+  text-align: left;
+  padding: 6px 8px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--fl-ink);
+  cursor: pointer;
+}
+.fl-doc-entry:hover { background: var(--fl-bg); }
+.fl-doc-marker { width: 0.9em; color: var(--fl-accent); flex: 0 0 auto; }
+/* The "this doc" caret + current-row accent so the user always sees which open window is THIS one. */
+.fl-doc-current { width: 0.8em; flex: 0 0 auto; color: var(--fl-accent); font-size: 0.85em; text-align: center; }
+.fl-doc-entry.fl-current { background: rgba(43, 89, 255, 0.08); font-weight: 600; }
+.fl-doc-entry.fl-current:hover { background: rgba(43, 89, 255, 0.12); }
+.fl-doc-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1 1 auto; }
+
+/* Outline pane: each row is [collapse caret | navigable label], indented by tier (data-tier 0..3) so the
+   hierarchy reads at a glance. The caret folds a heading's deeper children like Word's navigation pane. */
+.fl-outline-row { display: flex; align-items: center; }
+.fl-outline-row[data-tier="0"] { padding-left: 2px; }
+.fl-outline-row[data-tier="1"] { padding-left: 14px; }
+.fl-outline-row[data-tier="2"] { padding-left: 26px; }
+.fl-outline-row[data-tier="3"] { padding-left: 38px; }
+
+/* The collapse caret. A childless entry gets `.fl-leaf` → an invisible spacer so all labels stay aligned. */
+.fl-outline-caret {
+  flex: 0 0 auto;
+  width: 16px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--fl-ink-soft);
+  font-size: 0.7em;
+  line-height: 1;
+  cursor: pointer;
+}
+.fl-outline-caret:hover { color: var(--fl-ink); }
+.fl-outline-caret.fl-leaf { visibility: hidden; cursor: default; }
+
+.fl-outline-entry {
+  flex: 1 1 auto;
+  min-width: 0;
+  font: inherit;
+  font-size: 0.84em;
+  text-align: left;
+  padding: 4px 8px 4px 2px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--fl-ink);
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.fl-outline-entry:hover { background: var(--fl-bg); }
+.fl-outline-entry[data-tier="0"] { font-weight: 700; }
+.fl-outline-entry[data-tier="1"] { font-weight: 600; }
+.fl-outline-entry[data-tier="3"] { color: var(--fl-ink-soft); }
+
+/* The thin bottom strip under the surface — holds the sidebar-toggle affordance. `flex: 0 0 auto` pins it at
+   the bottom of the content column (the surface above it scrolls, the strip never does). */
+.fl-strip {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  padding: 6px 16px;
+  background: var(--fl-panel);
+  border-top: 1px solid var(--fl-line);
+}
+/* An icon-only (☰) square button — the redundant "Sidebar" label was dropped (aria-label/title carry meaning). */
+.fl-strip-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 26px;
+  padding: 0;
+  font-family: inherit; /* keep the ☰ glyph in the app sans stack, not the UA button default */
+  font-size: 1em;
+  line-height: 1;
+  border: 1px solid var(--fl-line);
+  border-radius: 6px;
+  background: var(--fl-panel);
+  color: var(--fl-ink-soft);
+  cursor: pointer;
+}
+.fl-strip-toggle:hover { border-color: var(--fl-accent); color: var(--fl-ink); }
+
+/* ── The editable ────────────────────────────────────────────────────────── */
+.ProseMirror {
+  /* FULL-BLEED EDITABLE. `width: 100%` + no `max-width` → the document fills the entire content column and
+     scales with screen width (the old centered 820px "page" is gone). `flex: 1` makes it fill the surface's
+     full HEIGHT as well, so a short document still leaves the whole area clickable; a long one grows past the
+     surface and the surface scrolls. The page-card chrome (border, radius, drop-shadow) is intentionally
+     removed — this is a document that takes up all the space, not a floating sheet on a gray desk. */
+  width: 100%;
+  flex: 1;
+  /* A generous bottom padding leaves a deliberate empty, clickable tail BELOW the last block.
+     A mousedown in this area (clientY below the last child's bottom) drops the caret at the doc end
+     (clickBelowContentPlugin in renderer/main.ts). The horizontal inset is now the document's only margin. */
+  padding: 40px 48px 160px;
+  font-family: var(--fl-font); /* pin the sans stack on the editable so nothing renders serif */
+  background: var(--fl-panel);
+  outline: none;
+}
+/* The editable is the primary surface and is effectively always focused; the caret itself signals focus, so
+   with the page-card gone there is no border/shadow to light up — keep focus visually quiet (no card ring). */
+.ProseMirror:focus { outline: none; }
+
+/* ── Blocks ──────────────────────────────────────────────────────────────── */
+.fl-card,
+.fl-analytic,
+.fl-heading,
+.fl-paragraph { margin: 0 0 14px; }
+
+.fl-card {
+  padding: 12px 14px;
+  border: 1px solid var(--fl-line);
+  border-left: 3px solid var(--fl-accent);
+  border-radius: 8px;
+  background: #fcfcfd;
+}
+/* Card lead-in: tag = bold claim line (13pt, matching analytic tier); cite = source/author line (11pt). */
+.fl-tag { font-weight: 700; font-size: 13pt; }
+.fl-cite { font-size: 11pt; color: var(--fl-ink-soft); margin: 2px 0 6px; }
+/* Empty-cite placeholder hint. A VIEW decoration (cite-placeholder.ts) adds .fl-cite--placeholder to
+   an empty, unfocused cite; this ::before renders the hint so a card built without a cite shows where the
+   source line goes. pointer-events/user-select: none so it never blocks the click that focuses the cite
+   (which then hides it) and is never selectable or copied. The hint also vanishes the moment the cite has
+   content (typed/pasted), and returns when the cite is empty and unfocused again. */
+.fl-cite--placeholder::before {
+  content: "[citation]";
+  color: var(--fl-ink-soft);
+  font-style: italic;
+  opacity: 0.6;
+  pointer-events: none;
+  user-select: none;
+}
+/* Body is a block wrapper holding one-or-more paragraphs (paragraph+). Lay it out as a
+   block and inherit the sans font; its child .fl-paragraph nodes carry their own spacing. */
+.fl-body { display: block; font-family: var(--fl-font); }
+/* Paragraphs INSIDE a card body sit snug: kill the last one's trailing margin so the card padding
+   stays even, and tighten inter-paragraph spacing relative to top-level paragraphs. */
+.fl-body .fl-paragraph { margin: 0 0 8px; }
+.fl-body .fl-paragraph:last-child { margin-bottom: 0; }
+
+/* Own-argument prose: dark blue AND always bold (Verbatim / debate analytic convention). 13pt. */
+.fl-analytic { color: var(--fl-analytic-ink); font-weight: 700; font-size: 13pt; }
+
+/* Type scale: normal paragraph and card body text = 11pt (matches Word DOCX_BASE_HALF_POINTS = 22 hp). */
+.fl-paragraph { color: var(--fl-ink); font-size: 11pt; }
+
+/* Headings follow Verbatim (public domain): bold, centered, full-width underline that spans the block.
+   pocket = boxed (border all sides), hat = double underline, block = single underline.
+   Type scale: exact Verbatim pt values in pt units so editor and .docx export agree. */
+.fl-heading { font-weight: 700; text-align: center; line-height: 1.3; margin: 18px 0 12px; }
+.fl-heading[data-level="pocket"] { font-size: 26pt; border: 2px solid currentColor; padding: 5px 10px; }
+.fl-heading[data-level="hat"] { font-size: 22pt; border-bottom: 4px double currentColor; padding-bottom: 3px; }
+.fl-heading[data-level="block"] { font-size: 16pt; border-bottom: 2px solid currentColor; padding-bottom: 2px; }
+
+/* ── Marks ───────────────────────────────────────────────────────────────── */
+.fl-highlight {
+  background: var(--fl-hl, var(--fl-color-yellow));
+  border-radius: 2px;
+  padding: 0 1px;
+  box-decoration-break: clone;
+}
+.fl-highlight[data-color="blue"] { --fl-hl: var(--fl-color-blue); }
+.fl-highlight[data-color="yellow"] { --fl-hl: var(--fl-color-yellow); }
+.fl-highlight[data-color="green"] { --fl-hl: var(--fl-color-green); }
+.fl-highlight[data-color="lightGray"] { --fl-hl: var(--fl-color-gray); }
+
+.fl-emphasis {
+  font-weight: 700;
+  text-decoration: underline;
+  outline: 1.5px solid currentColor;
+  outline-offset: 1px;
+  border-radius: 0; /* sharp corners on the box (user: "make the box sharper") */
+}
+
+.fl-muted { font-size: var(--fl-muted-size); color: inherit; }
+
+/* Read-aloud underline (schema v2): the plain "read this" marker, distinct from emphasis's boxed style. */
+.fl-underline { text-decoration: underline; }
+
+/* Bold/strong (schema v3): plain heavier weight (the Ctrl+B "B" affordance), distinct from emphasis's
+   bold+underline+box. Layers freely with every other mark. */
+.fl-strong { font-weight: 700; }

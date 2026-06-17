@@ -1,0 +1,11 @@
+{
+  // Electron MAIN-process side (node, NO DOM). Splitting this out from tsconfig.json is the runbook's
+  // "two tsconfigs" rule (ENVIRONMENT.md): without the DOM lib here, a stray `document`/`window` in the
+  // main or preload code fails typecheck instead of silently shipping and crashing at runtime.
+  // `npm run typecheck` runs BOTH this and tsconfig.json, so tsc sees every file.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "lib": ["ES2022"]
+  },
+  "include": ["src/main", "src/preload", "electron.vite.config.ts", "playwright.config.ts"]
+}
