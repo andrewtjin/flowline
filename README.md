@@ -17,7 +17,7 @@ npm test             # Vitest unit/integration tests
 npm run check        # full gate: typecheck + lint + schema-hash + tests
 ```
 
-## Document model (MVP)
+## Document model
 - **Blocks** (all isolating, each with a stable `blockId`): `card` (`tag`/`cite`/`body`),
   `analytic`, `heading` (`level ∈ pocket|hat|block`), `paragraph`.
 - **Inline:** `text`, `hard_break`.
