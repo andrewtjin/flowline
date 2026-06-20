@@ -14,6 +14,7 @@ import { TextSelection } from "prosemirror-state";
 import type { EditorState } from "prosemirror-state";
 import type { EditorView } from "prosemirror-view";
 import type { OpenDocEntry } from "../persistence/bridge";
+import type { DocView } from "./doc-registry";
 import { buildOutline, resolveBlockPos } from "./outline";
 
 // Which tab is showing. The two values map 1:1 to the two panes (only one mounted-visible at a time).
@@ -28,14 +29,37 @@ type SidebarTab = "documents" | "outline";
 export interface SidebarDeps {
   readonly getView: () => EditorView;
   readonly onFocusWindow: (winId: number) => void;
+  /**
+   * Create a new document — invoked by the "+ New document" button atop the DESKTOP Documents pane (mirrors the
+   * web pane's button + File▸New). Optional: omitted in tests/contexts that don't wire New, where the button is
+   * inert. (The web MDI pane has its own onNew via WebDocHandlers; this is the desktop multi-window path.)
+   */
+  readonly onNewDoc?: () => void;
+}
+
+/**
+ * Callbacks for the WEB (in-window MDI) Documents pane: select a doc by its registry id, close a doc by id, or
+ * create a new doc. Distinct from the desktop pane (which focuses a separate BrowserWindow); the web pane swaps
+ * the ACTIVE in-window doc and shows a per-row close (x). Wired by main.ts only when `!window.flowline`.
+ */
+export interface WebDocHandlers {
+  readonly onSelect: (id: string) => void;
+  readonly onClose: (id: string) => void;
+  readonly onNew: () => void;
 }
 
 /** The narrow control surface main.ts drives. Everything else (DOM, tab/visibility state) is private. */
 export interface Sidebar {
   /** The root element to mount into `.fl-main-row` (before the surface, as the left column). */
   readonly dom: HTMLElement;
-  /** Re-render the Documents pane from MAIN's latest open-windows broadcast. */
+  /** Re-render the Documents pane from MAIN's latest open-windows broadcast (DESKTOP multi-window). */
   setOpenDocs(docs: OpenDocEntry[]): void;
+  /**
+   * Re-render the Documents pane from the WEB in-window MDI registry. One-time `handlers` wire select/close/new;
+   * `docs` is re-passed on every registry mutation. Mutually exclusive with `setOpenDocs` — a window is either the
+   * desktop multi-window shell or the web single-window MDI, never both.
+   */
+  setWebDocs(docs: DocView[], handlers: WebDocHandlers): void;
   /** Re-derive + re-render the Outline pane from the current editor state (called in the dispatch seam). */
   syncOutline(state: EditorState): void;
   /** Show/hide the whole sidebar (the bottom strip + View menu toggle this). */
@@ -133,6 +157,18 @@ export function createSidebar(deps: SidebarDeps): Sidebar {
   const renderDocs = (docs: OpenDocEntry[]): void => {
     lastDocs = docs; // remember the list so setSelfWinId can re-mark it once this window's id resolves
     docsPane.replaceChildren(); // full re-render — the list is small and changes wholesale on each broadcast
+
+    // "+ New document" affordance at the top of the desktop Documents pane (mirrors the web pane + File▸New) so New
+    // is one click from the open-windows list — the user asked for parity with the web pane. Click runs the host's
+    // New (a reused-empty / freshly-spawned window). Inert if the host didn't wire onNewDoc (tests).
+    const newBtn = document.createElement("button");
+    newBtn.type = "button";
+    newBtn.className = "fl-doc-new";
+    newBtn.textContent = "+ New document";
+    newBtn.setAttribute("aria-label", "New document"); // so screen readers don't read the literal "+"
+    newBtn.addEventListener("click", () => deps.onNewDoc?.());
+    docsPane.appendChild(newBtn);
+
     for (const entry of docs) {
       const row = document.createElement("button");
       row.type = "button";
@@ -155,6 +191,61 @@ export function createSidebar(deps: SidebarDeps): Sidebar {
       row.append(here, marker, title);
       // Click → ask the host to focus that window. winId is captured per-row.
       row.addEventListener("click", () => deps.onFocusWindow(entry.winId));
+      docsPane.appendChild(row);
+    }
+  };
+
+  // ── WEB in-window MDI Documents pane ───────────────────────────────────────────────────────────────
+  // The web build opens multiple docs in ONE window (no Electron multi-window), so its Documents pane lists the
+  // renderer-side registry: a "New document" button on top, then one row per open doc with a ● dirty marker, a
+  // ▸ active marker, the title (click to switch), and an × to close that doc (guarded by the host's close-guard).
+  // Held so a re-render keeps the same callbacks; `null` until main.ts calls setWebDocs (desktop never does).
+  let webHandlers: WebDocHandlers | null = null;
+  const renderWebDocs = (docs: DocView[]): void => {
+    docsPane.replaceChildren();
+    if (!webHandlers) return;
+    const handlers = webHandlers;
+
+    // "New document" affordance at the top of the list (mirrors File > New for discoverability on web).
+    const newBtn = document.createElement("button");
+    newBtn.type = "button";
+    newBtn.className = "fl-doc-new";
+    newBtn.textContent = "+ New document";
+    newBtn.setAttribute("aria-label", "New document"); // so screen readers don't read the literal "+"
+    newBtn.addEventListener("click", () => handlers.onNew());
+    docsPane.appendChild(newBtn);
+
+    for (const doc of docs) {
+      // The row is a flex container (not itself a button) so it can hold a clickable title AND a separate close ×
+      // without nesting interactive elements (a button inside a button is invalid + breaks click semantics).
+      const row = document.createElement("div");
+      row.className = "fl-doc-entry";
+      if (doc.dirty) row.classList.add("fl-dirty");
+      if (doc.active) row.classList.add("fl-current");
+
+      const here = document.createElement("span");
+      here.className = "fl-doc-current";
+      here.textContent = doc.active ? "▸" : "";
+      const marker = document.createElement("span");
+      marker.className = "fl-doc-marker";
+      marker.textContent = doc.dirty ? "●" : "";
+      // The title is the switch affordance — a button so keyboard users can activate it; click switches active doc.
+      const title = document.createElement("button");
+      title.type = "button";
+      title.className = "fl-doc-title fl-doc-switch";
+      title.textContent = doc.title;
+      title.addEventListener("click", () => handlers.onSelect(doc.id));
+      // The close ×. stopPropagation is not needed (title is a sibling, not an ancestor), but the host's onClose
+      // runs the unsaved-changes guard before actually removing the doc.
+      const close = document.createElement("button");
+      close.type = "button";
+      close.className = "fl-doc-close";
+      close.textContent = "×";
+      close.title = "Close document";
+      close.setAttribute("aria-label", `Close ${doc.title}`);
+      close.addEventListener("click", () => handlers.onClose(doc.id));
+
+      row.append(here, marker, title, close);
       docsPane.appendChild(row);
     }
   };
@@ -248,6 +339,12 @@ export function createSidebar(deps: SidebarDeps): Sidebar {
   // doc state (no risk of parking doc state in the component).
   const syncOutline = (state: EditorState): void => renderOutline(state);
   const setOpenDocs = (docs: OpenDocEntry[]): void => renderDocs(docs);
+  // Web MDI: remember the handlers (first call) and (re-)render the registry list. The host calls this on every
+  // registry mutation (new/open/close/switch/dirty/rename) so the pane always mirrors the live registry.
+  const setWebDocs = (docs: DocView[], handlers: WebDocHandlers): void => {
+    webHandlers = handlers;
+    renderWebDocs(docs);
+  };
   // record this window's id and re-mark the Documents pane (the open-docs list may already be rendered).
   const setSelfWinId = (winId: number): void => {
     selfWinId = winId;
@@ -260,5 +357,5 @@ export function createSidebar(deps: SidebarDeps): Sidebar {
 
   render(); // initial paint (Documents tab, visible, empty panes)
 
-  return { dom: root, setOpenDocs, syncOutline, setVisible, setTab, toggle, setSelfWinId };
+  return { dom: root, setOpenDocs, setWebDocs, syncOutline, setVisible, setTab, toggle, setSelfWinId };
 }

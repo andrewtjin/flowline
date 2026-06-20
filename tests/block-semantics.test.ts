@@ -12,7 +12,6 @@ import {
   enter,
   backspace,
   insertCard,
-  insertCardAtCite,
   insertAnalytic,
   insertParagraph,
   insertHeading,
@@ -22,8 +21,8 @@ import {
   clearFormatting,
 } from "../src/commands";
 
-// Card children (tag/cite/body) are constructed via `buildCard`, so only the node types the suite
-// references directly are pulled out here.
+// Card children (tag/body) are constructed via `buildCard`, so only the node types the suite
+// references directly are pulled out here. (schema v5: `cite` is an inline MARK, not a card child.)
 const { doc, paragraph, heading, analytic, hard_break } = schema.nodes;
 const txt = (s: string): PMNode => schema.text(s);
 
@@ -33,20 +32,20 @@ const para = (text: string, id = "p"): PMNode => paragraph.create({ blockId: id 
 const head = (text: string, level = "block", id = "h"): PMNode =>
   heading.create({ blockId: id, level }, text ? txt(text) : null);
 const anal = (text: string, id = "a"): PMNode => analytic.create({ blockId: id }, text ? txt(text) : null);
-// v4: a card body is `paragraph+`. `aCard` builds a SINGLE-paragraph body (body paragraph id `${id}b`) via
-// buildCard so every card the suite constructs is check()-valid. `aCardMulti` builds a multi-paragraph body.
-const aCard = (t: string, c: string, b: string, id = "c"): PMNode =>
+// schema v5: a card is `tag body` (no cite child) and the body is `paragraph+`. `aCard` builds a
+// SINGLE-paragraph body (body paragraph id `${id}b`) via buildCard so every card the suite constructs is
+// check()-valid. `aCardMulti` builds a multi-paragraph body. (cite is now an inline mark — the helpers no
+// longer take a cite argument; there is no cite child to construct.)
+const aCard = (t: string, b: string, id = "c"): PMNode =>
   buildCard({
     blockId: id,
     tag: t ? [txt(t)] : undefined,
-    cite: c ? [txt(c)] : undefined,
     body: [{ blockId: `${id}b`, content: b ? [txt(b)] : undefined }],
   });
-const aCardMulti = (t: string, c: string, bodies: string[], id = "c"): PMNode =>
+const aCardMulti = (t: string, bodies: string[], id = "c"): PMNode =>
   buildCard({
     blockId: id,
     tag: t ? [txt(t)] : undefined,
-    cite: c ? [txt(c)] : undefined,
     body: bodies.map((b, i) => ({ blockId: `${id}b${i}`, content: b ? [txt(b)] : undefined })),
   });
 const mkDoc = (...blocks: PMNode[]): PMNode => doc.create(null, blocks);
@@ -255,14 +254,14 @@ describe("enter", () => {
   });
 
   it("at the END of a card BODY paragraph SPLITS into a new body paragraph WITHIN the card (never escapes it)", () => {
-    const d = mkDoc(aCard("Tag", "Cite", "Body text", "c1"));
+    const d = mkDoc(aCard("Tag", "Body text", "c1"));
     const s1 = run(cursorAt(stateOf(d), endOfBodyPara(d, 0)), enter).state;
     // still ONE top-level block — the card never spawned a sibling / escaped its isolating boundary
     expect(s1.doc.childCount).toBe(1);
     const card1 = s1.doc.child(0);
     expect(card1.type.name).toBe("card");
-    // the body now holds TWO paragraphs (the split), structure otherwise intact
-    const bodyNode = card1.child(2);
+    // the body now holds TWO paragraphs (the split), structure otherwise intact. body is child(1) now (tag, body).
+    const bodyNode = card1.child(1);
     expect(bodyNode.type.name).toBe("body");
     expect(bodyNode.childCount).toBe(2);
     expect(bodyNode.child(0).textContent).toBe("Body text"); // original text kept in the first paragraph
@@ -278,14 +277,31 @@ describe("enter", () => {
     expect(() => card1.check()).not.toThrow();
   });
 
-  it("at the END of a card TAG inserts a hard_break (tag/cite never spawn a sibling block)", () => {
-    const d = mkDoc(aCard("Tag", "Cite", "Body", "c1"));
+  it("at the END of a card TAG moves the caret into the first body paragraph (NO hard_break, no second tag)", () => {
+    const d = mkDoc(aCard("Tag", "Body", "c1"));
     const s1 = run(cursorAt(stateOf(d), endOf(d, "tag")), enter).state;
     expect(s1.doc.childCount).toBe(1); // still one top-level block (the card)
-    expect(countType(s1.doc.child(0), "hard_break")).toBe(1); // a break was added inside the tag
-    expect(countType(s1.doc.child(0), "tag")).toBe(1); // structure intact
-    expect(countType(s1.doc.child(0), "cite")).toBe(1);
+    // ZERO hard_breaks: the old fallback inserted a <br> inside the tag that looked like a second tag line.
+    expect(countType(s1.doc.child(0), "hard_break")).toBe(0);
+    // Card structure fully intact: one card, one tag, one body — content unchanged (a pure caret move).
+    expect(s1.doc.child(0).type.name).toBe("card");
+    expect(countType(s1.doc.child(0), "tag")).toBe(1);
     expect(countType(s1.doc.child(0), "body")).toBe(1);
+    expect(s1.doc.eq(d)).toBe(true); // no content changed at all — only the selection moved
+    // Caret landed at the START of the card's first body paragraph (depth 3: doc>card>body>paragraph).
+    expect(s1.selection.empty).toBe(true);
+    expect(s1.selection.$from.parent.type.name).toBe("paragraph");
+    expect(s1.selection.$from.node(2).type.name).toBe("body");
+    expect(s1.selection.$from.parentOffset).toBe(0); // at the start of the body paragraph's content
+  });
+
+  it("at the END of a card TAG with an EMPTY first body paragraph still lands a valid caret in the body", () => {
+    const d = mkDoc(aCard("Tag", "", "c1")); // empty first body paragraph
+    const s1 = run(cursorAt(stateOf(d), endOf(d, "tag")), enter).state;
+    expect(countType(s1.doc.child(0), "hard_break")).toBe(0);
+    expect(s1.selection.$from.parent.type.name).toBe("paragraph");
+    expect(s1.selection.$from.node(2).type.name).toBe("body");
+    expect(s1.selection.$from.parentOffset).toBe(0);
   });
 
   it("MID-inline (caret in the middle of text) inserts a hard_break, not a new block", () => {
@@ -307,7 +323,7 @@ describe("enter", () => {
   });
 
   it("swallows (no-op) a selection spanning two card children — never collapses a required-child boundary", () => {
-    const original = aCard("TagText", "CiteText", "BodyText", "c1");
+    const original = aCard("TagText", "BodyText", "c1");
     const d = mkDoc(original);
     const from = startOf(d, "tag") + 1; // inside tag
     const to = startOfBodyPara(d, 0) + 1; // inside the body paragraph — a cross-textblock selection
@@ -330,17 +346,17 @@ describe("backspace", () => {
   });
 
   it("is a NO-OP at the start of a card TAG (never merges / deletes a required child)", () => {
-    const d = mkDoc(aCard("Tag", "Cite", "Body", "c1"));
+    const d = mkDoc(aCard("Tag", "Body", "c1"));
     const { ok, state: s1 } = run(cursorAt(stateOf(d), startOf(d, "tag")), backspace);
     expect(ok).toBe(true); // swallowed
     expect(s1.doc.eq(d)).toBe(true); // card fully intact
   });
 
-  it("is a NO-OP at the start of the FIRST card BODY paragraph (would otherwise merge body into cite)", () => {
-    const d = mkDoc(aCard("Tag", "Cite", "Body", "c1"));
+  it("is a NO-OP at the start of the FIRST card BODY paragraph (would otherwise merge body into the tag)", () => {
+    const d = mkDoc(aCard("Tag", "Body", "c1"));
     const s1 = run(cursorAt(stateOf(d), startOfBodyPara(d, 0)), backspace).state;
     expect(s1.doc.eq(d)).toBe(true);
-    expect(countType(s1.doc.child(0), "cite")).toBe(1);
+    expect(countType(s1.doc.child(0), "tag")).toBe(1);
     expect(countType(s1.doc.child(0), "body")).toBe(1);
   });
 
@@ -382,7 +398,7 @@ describe("backspace", () => {
   });
 
   it("swallows a selection spanning two card children (protects required children)", () => {
-    const d = mkDoc(aCard("TagText", "CiteText", "BodyText", "c1"));
+    const d = mkDoc(aCard("TagText", "BodyText", "c1"));
     const from = startOf(d, "tag") + 1;
     const to = startOfBodyPara(d, 0) + 1;
     const { ok, state: s1 } = run(rangeAt(stateOf(d), from, to), backspace);
@@ -395,7 +411,7 @@ describe("backspace", () => {
 // A NodeSelection on a top-level block, and a single-block AllSelection (Ctrl+A down to one block),
 // both satisfy `$from.sameParent($to)` because their endpoints resolve with the DOC as parent. Backspace
 // must NOT treat these as an inline delete — doing so would wipe a whole isolating block / a card's
-// required tag·cite·body. Both Enter and Backspace must SWALLOW them (no structural destruction).
+// required tag·body. Both Enter and Backspace must SWALLOW them (no structural destruction).
 describe("Enter / Backspace on whole-block selections never destroy structure", () => {
   // Offset (position before) the first top-level block of `typeName`.
   function offsetOf(d: PMNode, typeName: string): number {
@@ -410,14 +426,14 @@ describe("Enter / Backspace on whole-block selections never destroy structure", 
   const allSel = (s: EditorState): EditorState => s.apply(s.tr.setSelection(new AllSelection(s.doc)));
 
   it("Backspace on a NODE-SELECTED card is a no-op (card + its required children survive)", () => {
-    const d = mkDoc(aCard("Tag", "Cite", "Body", "c1"), para("after", "p1"));
+    const d = mkDoc(aCard("Tag", "Body", "c1"), para("after", "p1"));
     const { ok, state } = run(nodeSel(stateOf(d), "card"), backspace);
     expect(ok).toBe(true);
     expect(state.doc.eq(d)).toBe(true); // nothing deleted
   });
 
   it("Backspace on a single-block AllSelection (Ctrl+A) is a no-op (doc not emptied)", () => {
-    const d = mkDoc(aCard("Tag", "Cite", "Body", "c1"));
+    const d = mkDoc(aCard("Tag", "Body", "c1"));
     const { state } = run(allSel(stateOf(d)), backspace);
     expect(state.doc.eq(d)).toBe(true);
     expect(state.doc.childCount).toBe(1);
@@ -431,14 +447,14 @@ describe("Enter / Backspace on whole-block selections never destroy structure", 
   });
 
   it("Enter on a NODE-SELECTED card is a no-op (does not split/replace the card)", () => {
-    const d = mkDoc(aCard("Tag", "Cite", "Body", "c1"));
+    const d = mkDoc(aCard("Tag", "Body", "c1"));
     const { ok, state } = run(nodeSel(stateOf(d), "card"), enter);
     expect(ok).toBe(true);
     expect(state.doc.eq(d)).toBe(true);
   });
 
   it("Enter on an AllSelection is a no-op", () => {
-    const d = mkDoc(aCard("Tag", "Cite", "Body", "c1"));
+    const d = mkDoc(aCard("Tag", "Body", "c1"));
     const { state } = run(allSel(stateOf(d)), enter);
     expect(state.doc.eq(d)).toBe(true);
   });
@@ -446,19 +462,15 @@ describe("Enter / Backspace on whole-block selections never destroy structure", 
 
 // ── Inserts ──────────────────────────────────────────────────────────────────────────────────────
 describe("insertCard", () => {
-  it("builds card{tag,cite,body} with a fresh blockId in ONE transaction, caret in the tag", () => {
+  it("builds a tag/body card with a fresh blockId in ONE transaction, caret in the tag", () => {
     const d = mkDoc(para("seed", "p1"));
     const { ok, state: s1, dispatches } = run(cursorAt(stateOf(d), startOf(d, "paragraph") + 1), insertCard);
     expect(ok).toBe(true);
     expect(dispatches).toBe(1); // exactly one tr — the card is never half-built
     const newCard = s1.doc.child(1);
     expect(newCard.type.name).toBe("card");
-    expect(newCard.childCount).toBe(3);
-    expect([newCard.child(0).type.name, newCard.child(1).type.name, newCard.child(2).type.name]).toEqual([
-      "tag",
-      "cite",
-      "body",
-    ]);
+    expect(newCard.childCount).toBe(2); // schema v5: tag + body (no cite child)
+    expect([newCard.child(0).type.name, newCard.child(1).type.name]).toEqual(["tag", "body"]);
     expect(typeof newCard.attrs.blockId).toBe("string");
     expect(newCard.attrs.blockId).not.toBe("p1");
     expect(blockIds(s1).filter((id) => id === newCard.attrs.blockId)).toHaveLength(1); // unique id
@@ -471,7 +483,7 @@ describe("insertCard", () => {
     const d = mkDoc(para("seed", "p1"));
     const s1 = run(cursorAt(stateOf(d), startOf(d, "paragraph") + 1), insertCard).state;
     const newCard = s1.doc.child(1);
-    const bodyNode = newCard.child(2);
+    const bodyNode = newCard.child(1); // body is child(1) now (tag, body)
     expect(bodyNode.type.name).toBe("body");
     expect(bodyNode.childCount).toBe(1); // exactly one body paragraph
     expect(bodyNode.child(0).type.name).toBe("paragraph");
@@ -479,13 +491,6 @@ describe("insertCard", () => {
     expect(typeof bodyNode.child(0).attrs.blockId).toBe("string"); // a real id
     expect(bodyNode.child(0).attrs.blockId.length).toBeGreaterThan(0);
     expect(() => newCard.check()).not.toThrow(); // the whole card is conformance-valid
-  });
-
-  it("caret lands in the CITE for insertCardAtCite, body still one valid paragraph", () => {
-    const d = mkDoc(para("seed", "p1"));
-    const s1 = run(cursorAt(stateOf(d), startOf(d, "paragraph") + 1), insertCardAtCite).state;
-    expect(s1.selection.$from.parent.type.name).toBe("cite");
-    expect(() => s1.doc.child(1).check()).not.toThrow();
   });
 });
 
@@ -546,11 +551,11 @@ describe("backspace removes a blank line", () => {
   });
 
   it("does NOT remove the only (empty) card BODY paragraph (a required child — not a top-level blank line)", () => {
-    const d = mkDoc(aCard("Tag", "Cite", "", "c1")); // body = one empty paragraph
+    const d = mkDoc(aCard("Tag", "", "c1")); // body = one empty paragraph
     const state = run(cursorAt(stateOf(d), startOfBodyPara(d, 0)), backspace).state;
     expect(state.doc.eq(d)).toBe(true);
     expect(countType(state.doc.child(0), "body")).toBe(1);
-    expect(state.doc.child(0).child(2).childCount).toBe(1); // body still has its one paragraph
+    expect(state.doc.child(0).child(1).childCount).toBe(1); // body (child(1)) still has its one paragraph
   });
 
   it("does NOT remove a NON-empty block on backspace-at-start (no content merge across the boundary)", () => {
@@ -587,18 +592,17 @@ describe("setHeadingLevel", () => {
   });
 
   it("DISSOLVES a card when the caret is in its tag (folded into setHeadingLevel)", () => {
-    const d = mkDoc(aCard("Tag", "Cite", "Body", "c1"));
+    const d = mkDoc(aCard("Tag", "Body", "c1"));
     const { ok, state } = run(cursorAt(stateOf(d), startOf(d, "tag")), setHeadingLevel("hat"));
     expect(ok).toBe(true);
-    // card gone; ejected as heading(tag) + paragraph(cite) + paragraph(body), in order
+    // card gone; ejected as heading(tag) + paragraph(body), in order (no cite paragraph — cite is a mark now)
     expect(countType(state.doc, "card")).toBe(0);
+    expect(state.doc.childCount).toBe(2);
     expect(state.doc.child(0).type.name).toBe("heading");
     expect(state.doc.child(0).attrs.level).toBe("hat");
     expect(state.doc.child(0).textContent).toBe("Tag");
     expect(state.doc.child(1).type.name).toBe("paragraph");
-    expect(state.doc.child(1).textContent).toBe("Cite");
-    expect(state.doc.child(2).type.name).toBe("paragraph");
-    expect(state.doc.child(2).textContent).toBe("Body");
+    expect(state.doc.child(1).textContent).toBe("Body");
   });
 
   it("converts a NODE-SELECTED top-level block too (consistent with moveCurrentBlock)", () => {
@@ -616,10 +620,10 @@ describe("setHeadingLevel", () => {
 // ── paragraph+ body — multi-paragraph Enter split & Backspace join ────────────────────────────────
 describe("card body paragraph+ Enter/Backspace", () => {
   it("Enter at the end of the FIRST of two body paragraphs inserts a new paragraph BETWEEN them (stays in body)", () => {
-    const d = mkDoc(aCardMulti("Tag", "Cite", ["one", "two"], "c1"));
+    const d = mkDoc(aCardMulti("Tag", ["one", "two"], "c1"));
     const s1 = run(cursorAt(stateOf(d), endOfBodyPara(d, 0)), enter).state;
     expect(s1.doc.childCount).toBe(1); // never escaped the card
-    const bodyNode = s1.doc.child(0).child(2);
+    const bodyNode = s1.doc.child(0).child(1); // body is child(1) now (tag, body)
     expect(bodyNode.childCount).toBe(3); // one | (new empty) | two
     expect(bodyNode.child(0).textContent).toBe("one");
     expect(bodyNode.child(1).content.size).toBe(0);
@@ -628,10 +632,10 @@ describe("card body paragraph+ Enter/Backspace", () => {
   });
 
   it("Backspace at the START of a NON-FIRST body paragraph JOINS it with the previous body paragraph", () => {
-    const d = mkDoc(aCardMulti("Tag", "Cite", ["alpha", "beta"], "c1"));
+    const d = mkDoc(aCardMulti("Tag", ["alpha", "beta"], "c1"));
     const s1 = run(cursorAt(stateOf(d), startOfBodyPara(d, 1)), backspace).state;
     expect(s1.doc.childCount).toBe(1);
-    const bodyNode = s1.doc.child(0).child(2);
+    const bodyNode = s1.doc.child(0).child(1); // body is child(1) now (tag, body)
     expect(bodyNode.childCount).toBe(1); // the two paragraphs merged into one
     expect(bodyNode.child(0).textContent).toBe("alphabeta"); // content concatenated in order
     // caret sits at the seam (end of the original first paragraph's content)
@@ -641,15 +645,15 @@ describe("card body paragraph+ Enter/Backspace", () => {
     expect(() => s1.doc.child(0).check()).not.toThrow();
   });
 
-  it("Backspace at the START of the FIRST body paragraph is a NO-OP (never merges into cite / destroys the card)", () => {
-    const d = mkDoc(aCardMulti("Tag", "Cite", ["only", "second"], "c1"));
+  it("Backspace at the START of the FIRST body paragraph is a NO-OP (never merges into the tag / destroys the card)", () => {
+    const d = mkDoc(aCardMulti("Tag", ["only", "second"], "c1"));
     const { ok, state } = run(cursorAt(stateOf(d), startOfBodyPara(d, 0)), backspace);
     expect(ok).toBe(true); // swallowed
-    expect(state.doc.eq(d)).toBe(true); // nothing moved across the cite/body boundary
+    expect(state.doc.eq(d)).toBe(true); // nothing moved across the tag/body boundary
   });
 
   it("Backspace mid-text in a body paragraph DELEGATES to the browser (ordinary char, returns false)", () => {
-    const d = mkDoc(aCardMulti("Tag", "Cite", ["hello"], "c1"));
+    const d = mkDoc(aCardMulti("Tag", ["hello"], "c1"));
     const { ok, dispatches } = run(cursorAt(stateOf(d), startOfBodyPara(d, 0) + 3), backspace);
     expect(ok).toBe(false);
     expect(dispatches).toBe(0);
@@ -666,9 +670,9 @@ describe("convertToTag", () => {
     expect(state.doc.childCount).toBe(1); // the three blocks folded into one card
     const cardNode = state.doc.child(0);
     expect(cardNode.type.name).toBe("card");
+    expect(cardNode.childCount).toBe(2); // tag + body (no cite child)
     expect(cardNode.child(0).textContent).toBe("Claim text"); // tag = source block content
-    expect(cardNode.child(1).content.size).toBe(0); // cite is empty
-    const bodyNode = cardNode.child(2);
+    const bodyNode = cardNode.child(1); // body is child(1) now (tag, body)
     expect(bodyNode.childCount).toBe(2);
     expect(bodyNode.child(0).textContent).toBe("evidence one");
     expect(bodyNode.child(1).textContent).toBe("evidence two");
@@ -684,8 +688,8 @@ describe("convertToTag", () => {
     // card absorbs only p2; the empty p3 and p4 remain top-level
     expect(state.doc.childCount).toBe(3);
     expect(state.doc.child(0).type.name).toBe("card");
-    expect(state.doc.child(0).child(2).childCount).toBe(1);
-    expect(state.doc.child(0).child(2).child(0).textContent).toBe("body a");
+    expect(state.doc.child(0).child(1).childCount).toBe(1); // body is child(1)
+    expect(state.doc.child(0).child(1).child(0).textContent).toBe("body a");
     expect(state.doc.child(1).type.name).toBe("paragraph");
     expect(state.doc.child(1).content.size).toBe(0); // the stop paragraph, untouched
     expect(state.doc.child(2).textContent).toBe("body c");
@@ -697,8 +701,8 @@ describe("convertToTag", () => {
     const { state } = run(cursorAt(stateOf(d), startOf(d, "paragraph") + 1), convertToTag());
     expect(state.doc.childCount).toBe(2);
     expect(state.doc.child(0).type.name).toBe("card");
-    expect(state.doc.child(0).child(2).childCount).toBe(1);
-    expect(state.doc.child(0).child(2).child(0).textContent).toBe("body a");
+    expect(state.doc.child(0).child(1).childCount).toBe(1); // body is child(1)
+    expect(state.doc.child(0).child(1).child(0).textContent).toBe("body a");
     expect(state.doc.child(1).type.name).toBe("heading"); // heading survives untouched
     expect(() => state.doc.child(0).check()).not.toThrow();
   });
@@ -710,8 +714,8 @@ describe("convertToTag", () => {
     const cardNode = state.doc.child(0);
     expect(cardNode.type.name).toBe("card");
     expect(cardNode.child(0).textContent).toBe("Lonely claim");
-    expect(cardNode.child(2).childCount).toBe(1); // exactly one body paragraph
-    expect(cardNode.child(2).child(0).content.size).toBe(0); // and it's empty
+    expect(cardNode.child(1).childCount).toBe(1); // exactly one body paragraph (body is child(1))
+    expect(cardNode.child(1).child(0).content.size).toBe(0); // and it's empty
     expect(() => cardNode.check()).not.toThrow();
   });
 
@@ -720,7 +724,7 @@ describe("convertToTag", () => {
     const { state } = run(cursorAt(stateOf(d), startOf(d, "heading") + 1), convertToTag());
     expect(state.doc.child(0).type.name).toBe("card");
     expect(state.doc.child(0).child(0).textContent).toBe("Heading claim");
-    expect(state.doc.child(0).child(2).child(0).textContent).toBe("supporting");
+    expect(state.doc.child(0).child(1).child(0).textContent).toBe("supporting"); // body is child(1)
     expect(() => state.doc.child(0).check()).not.toThrow();
   });
 
@@ -733,19 +737,19 @@ describe("convertToTag", () => {
     expect(state.doc.child(0).attrs.blockId).toBe("p1"); // first block untouched
     expect(state.doc.child(1).type.name).toBe("card");
     expect(state.doc.child(1).child(0).textContent).toBe("Claim at end");
-    expect(state.doc.child(1).child(2).childCount).toBe(1); // one empty body paragraph
+    expect(state.doc.child(1).child(1).childCount).toBe(1); // one empty body paragraph (body is child(1))
     expect(() => state.doc.child(1).check()).not.toThrow();
   });
 
   it("is a NO-OP (false) when the from-side block is a CARD (never re-wraps a structured card)", () => {
-    const d = mkDoc(aCard("Tag", "Cite", "Body", "c1"));
+    const d = mkDoc(aCard("Tag", "Body", "c1"));
     const { ok, state } = run(cursorAt(stateOf(d), startOf(d, "tag")), convertToTag());
     expect(ok).toBe(false);
     expect(state.doc.eq(d)).toBe(true);
   });
 
   it("is a NO-OP (false) with the caret inside a card BODY paragraph (a card child is never converted)", () => {
-    const d = mkDoc(para("before", "p0"), aCard("Tag", "Cite", "Body", "c1"));
+    const d = mkDoc(para("before", "p0"), aCard("Tag", "Body", "c1"));
     const { ok, state } = run(cursorAt(stateOf(d), startOfBodyPara(d, 0)), convertToTag());
     expect(ok).toBe(false);
     expect(state.doc.eq(d)).toBe(true);
@@ -765,12 +769,12 @@ describe("convertToTag", () => {
     expect(ok).toBe(true);
     expect(state.doc.child(0).type.name).toBe("card");
     expect(state.doc.child(0).child(0).textContent).toBe("Claim");
-    expect(state.doc.child(0).child(2).child(0).textContent).toBe("ev"); // absorbed the following paragraph
+    expect(state.doc.child(0).child(1).child(0).textContent).toBe("ev"); // body (child(1)) absorbed the following paragraph
     expect(() => state.doc.child(0).check()).not.toThrow();
   });
 
   it("on a NODE-SELECTED card returns false (never destroys the isolating card)", () => {
-    const d = mkDoc(aCard("Tag", "Cite", "Body", "c1"));
+    const d = mkDoc(aCard("Tag", "Body", "c1"));
     const { ok, state } = run(nodeSelAt(stateOf(d), "card"), convertToTag());
     expect(ok).toBe(false);
     expect(state.doc.eq(d)).toBe(true);
@@ -793,9 +797,9 @@ describe("convertToTag", () => {
       if (n.isText && n.marks.some((m) => m.type === hl && m.attrs.color === "yellow")) sawYellow = true;
     });
     expect(sawYellow).toBe(true);
-    // body paragraph kept the underline
+    // body paragraph kept the underline (body is child(1))
     let sawUnderline = false;
-    cardNode.child(2).descendants((n) => {
+    cardNode.child(1).descendants((n) => {
       if (n.isText && n.marks.some((m) => m.type === schema.marks.underline)) sawUnderline = true;
     });
     expect(sawUnderline).toBe(true);
@@ -805,18 +809,17 @@ describe("convertToTag", () => {
 
 // ── dissolveCard (folded into setHeadingLevel) ───────────────────────────────────────────────────
 describe("dissolveCard via setHeadingLevel", () => {
-  it("ejects tag→heading, cite→paragraph, each body paragraph→paragraph IN ORDER, no orphan card, ONE tr", () => {
-    const d = mkDoc(aCardMulti("Claim", "Author 2020", ["body one", "body two"], "c1"));
+  it("ejects tag→heading, each body paragraph→paragraph IN ORDER, no orphan card, ONE tr (no cite paragraph)", () => {
+    const d = mkDoc(aCardMulti("Claim", ["body one", "body two"], "c1"));
     const { ok, state, dispatches } = run(cursorAt(stateOf(d), startOf(d, "tag")), setHeadingLevel("block"));
     expect(ok).toBe(true);
     expect(dispatches).toBe(1);
     expect(countType(state.doc, "card")).toBe(0); // no orphan card
-    expect(state.doc.childCount).toBe(4); // heading + cite-para + 2 body-paras
+    expect(state.doc.childCount).toBe(3); // heading(tag) + 2 body-paras (NO cite paragraph — cite is a mark)
     expect(state.doc.child(0).type.name).toBe("heading");
     expect(state.doc.child(0).textContent).toBe("Claim");
-    expect(state.doc.child(1).textContent).toBe("Author 2020");
-    expect(state.doc.child(2).textContent).toBe("body one");
-    expect(state.doc.child(3).textContent).toBe("body two");
+    expect(state.doc.child(1).textContent).toBe("body one");
+    expect(state.doc.child(2).textContent).toBe("body two");
     // every ejected block is a valid top-level block with a fresh string id
     for (let i = 0; i < state.doc.childCount; i++) {
       expect(typeof state.doc.child(i).attrs.blockId).toBe("string");
@@ -824,17 +827,8 @@ describe("dissolveCard via setHeadingLevel", () => {
     expect(() => state.doc.check()).not.toThrow();
   });
 
-  it("OMITS the cite paragraph when the cite is empty", () => {
-    const d = mkDoc(aCardMulti("Claim", "", ["body one"], "c1")); // empty cite
-    const { state } = run(cursorAt(stateOf(d), startOf(d, "tag")), setHeadingLevel("hat"));
-    expect(state.doc.childCount).toBe(2); // heading + 1 body-para, NO cite paragraph
-    expect(state.doc.child(0).type.name).toBe("heading");
-    expect(state.doc.child(0).textContent).toBe("Claim");
-    expect(state.doc.child(1).textContent).toBe("body one");
-  });
-
   it("dissolves a NODE-SELECTED card too", () => {
-    const d = mkDoc(aCard("Claim", "Cite", "Body", "c1"));
+    const d = mkDoc(aCard("Claim", "Body", "c1"));
     const { ok, state } = run(nodeSelAt(stateOf(d), "card"), setHeadingLevel("pocket"));
     expect(ok).toBe(true);
     expect(countType(state.doc, "card")).toBe(0);
@@ -850,29 +844,10 @@ describe("dissolveCard via setHeadingLevel", () => {
   });
 
   it("dissolve fresh ids do not collide with any surviving block ids", () => {
-    const d = mkDoc(aCard("Claim", "Cite", "Body", "c1"), para("after", "p1"));
+    const d = mkDoc(aCard("Claim", "Body", "c1"), para("after", "p1"));
     const { state } = run(cursorAt(stateOf(d), startOf(d, "tag")), setHeadingLevel("block"));
     const ids = blockIds(state);
     expect(new Set(ids).size).toBe(ids.length); // all unique
-  });
-
-  // A caret in the CITE promotes the CITE to the heading (not the tag). With an empty tag, the tag still
-  // ejects as a (here empty) top-level paragraph FIRST, then the cite heading, then the body paragraph.
-  it("a caret in the CITE makes the CITE the heading; an empty tag ejects as an empty paragraph before it", () => {
-    const d = mkDoc(aCardMulti("", "Cite", ["body one"], "c1")); // empty tag
-    const { ok, state } = run(cursorAt(stateOf(d), startOf(d, "cite")), setHeadingLevel("hat"));
-    expect(ok).toBe(true);
-    expect(countType(state.doc, "card")).toBe(0);
-    expect(state.doc.childCount).toBe(3);
-    expect(state.doc.child(0).type.name).toBe("paragraph"); // the (empty) tag ejected first
-    expect(state.doc.child(0).content.size).toBe(0);
-    expect(state.doc.child(1).type.name).toBe("heading"); // the cite became the heading
-    expect(state.doc.child(1).attrs.level).toBe("hat");
-    expect(state.doc.child(1).textContent).toBe("Cite");
-    expect(state.doc.child(2).type.name).toBe("paragraph");
-    expect(state.doc.child(2).textContent).toBe("body one"); // body ejected after, id kept
-    expect(state.doc.child(2).attrs.blockId).toBe("c1b0");
-    expect(() => state.doc.check()).not.toThrow();
   });
 });
 
@@ -881,8 +856,8 @@ describe("setHeadingLevel splits a card at a body paragraph", () => {
   // a caret at the start of the n-th body paragraph of the first card
   const caretInBody = (d: PMNode, n: number): EditorState => cursorAt(stateOf(d), startOfBodyPara(d, n));
 
-  it("splits at body paragraph 1: front card keeps tag/cite + preceding para, that para → heading, trailing paras float", () => {
-    const d = mkDoc(aCardMulti("Tag", "Cite", ["b0", "b1", "b2", "b3"], "c1"));
+  it("splits at body paragraph 1: front card keeps tag + preceding para, that para → heading, trailing paras float", () => {
+    const d = mkDoc(aCardMulti("Tag", ["b0", "b1", "b2", "b3"], "c1"));
     const { ok, state, dispatches } = run(caretInBody(d, 1), setHeadingLevel("pocket"));
     expect(ok).toBe(true);
     expect(dispatches).toBe(1); // ONE transaction
@@ -894,10 +869,9 @@ describe("setHeadingLevel splits a card at a body paragraph", () => {
     expect(front.type.name).toBe("card");
     expect(front.attrs.blockId).toBe("c1"); // same card, kept its id
     expect(front.child(0).textContent).toBe("Tag");
-    expect(front.child(1).textContent).toBe("Cite");
-    expect(front.child(2).type.name).toBe("body");
-    expect(front.child(2).childCount).toBe(1); // only the preceding body paragraph remains
-    expect(front.child(2).child(0).textContent).toBe("b0");
+    expect(front.child(1).type.name).toBe("body"); // body is child(1) now (tag, body)
+    expect(front.child(1).childCount).toBe(1); // only the preceding body paragraph remains
+    expect(front.child(1).child(0).textContent).toBe("b0");
 
     const headed = state.doc.child(1);
     expect(headed.type.name).toBe("heading");
@@ -916,18 +890,18 @@ describe("setHeadingLevel splits a card at a body paragraph", () => {
   });
 
   it("splits at the LAST body paragraph: nothing floats, front card keeps the rest", () => {
-    const d = mkDoc(aCardMulti("Tag", "Cite", ["b0", "b1"], "c1"));
+    const d = mkDoc(aCardMulti("Tag", ["b0", "b1"], "c1"));
     const { state } = run(caretInBody(d, 1), setHeadingLevel("hat"));
     expect(state.doc.childCount).toBe(2); // front card + heading only
     expect(state.doc.child(0).type.name).toBe("card");
-    expect(state.doc.child(0).child(2).childCount).toBe(1); // b0 stays in the front card
+    expect(state.doc.child(0).child(1).childCount).toBe(1); // b0 stays in the front card body (child(1))
     expect(state.doc.child(1).type.name).toBe("heading");
     expect(state.doc.child(1).textContent).toBe("b1");
     expect(() => state.doc.check()).not.toThrow();
   });
 
   it("preserves every blockId (no duplicates) and respects the chosen level (F6 → block)", () => {
-    const d = mkDoc(aCardMulti("Tag", "Cite", ["b0", "b1", "b2"], "c1"));
+    const d = mkDoc(aCardMulti("Tag", ["b0", "b1", "b2"], "c1"));
     const { state } = run(caretInBody(d, 1), setHeadingLevel("block"));
     expect(state.doc.child(1).attrs.level).toBe("block");
     const ids = blockIds(state); // top-level ids: c1 (front card), c1b1 (heading), c1b2 (trailing)
@@ -936,7 +910,7 @@ describe("setHeadingLevel splits a card at a body paragraph", () => {
   });
 
   it("leaves blocks AFTER the card untouched", () => {
-    const d = mkDoc(aCardMulti("Tag", "Cite", ["b0", "b1"], "c1"), para("after", "p9"));
+    const d = mkDoc(aCardMulti("Tag", ["b0", "b1"], "c1"), para("after", "p9"));
     const { state } = run(caretInBody(d, 1), setHeadingLevel("pocket"));
     const last = state.doc.child(state.doc.childCount - 1);
     expect(last.type.name).toBe("paragraph");
@@ -945,30 +919,29 @@ describe("setHeadingLevel splits a card at a body paragraph", () => {
   });
 
   it("drops the caret in the new heading after the split", () => {
-    const d = mkDoc(aCardMulti("Tag", "Cite", ["b0", "b1", "b2"], "c1"));
+    const d = mkDoc(aCardMulti("Tag", ["b0", "b1", "b2"], "c1"));
     const { state } = run(caretInBody(d, 1), setHeadingLevel("hat"));
     expect(state.selection.$from.parent.type.name).toBe("heading");
     expect(state.selection.$from.parent.textContent).toBe("b1");
   });
 
-  // The FIRST body paragraph (index 0) now promotes BODY0 to the heading and ejects the tag + cite ABOVE
-  // it (no front card survives) and any later body paragraphs below it — the SELECTED line becomes the heading.
-  it("at the FIRST body paragraph (index 0) BODY0 becomes the heading; tag + cite eject above it, later bodies below", () => {
-    const d = mkDoc(aCardMulti("Tag", "Cite", ["b0", "b1"], "c1"));
+  // The FIRST body paragraph (index 0) now promotes BODY0 to the heading and ejects the tag ABOVE it
+  // (no front card survives) and any later body paragraphs below it — the SELECTED line becomes the heading.
+  // (schema v5: there is no cite child to eject — cite is an inline mark.)
+  it("at the FIRST body paragraph (index 0) BODY0 becomes the heading; tag ejects above it, later bodies below", () => {
+    const d = mkDoc(aCardMulti("Tag", ["b0", "b1"], "c1"));
     const { state } = run(caretInBody(d, 0), setHeadingLevel("pocket"));
     expect(countType(state.doc, "card")).toBe(0);
-    expect(state.doc.childCount).toBe(4); // tag-para, cite-para, heading(b0), para(b1)
+    expect(state.doc.childCount).toBe(3); // tag-para, heading(b0), para(b1) — NO cite paragraph
     expect(state.doc.child(0).type.name).toBe("paragraph");
     expect(state.doc.child(0).textContent).toBe("Tag"); // tag ejected first
-    expect(state.doc.child(1).type.name).toBe("paragraph");
-    expect(state.doc.child(1).textContent).toBe("Cite"); // non-empty cite ejected second
-    expect(state.doc.child(2).type.name).toBe("heading"); // BODY0 is the selected line → the heading
-    expect(state.doc.child(2).attrs.level).toBe("pocket");
-    expect(state.doc.child(2).textContent).toBe("b0");
-    expect(state.doc.child(2).attrs.blockId).toBe("c1b0"); // body0 keeps its id onto the heading
-    expect(state.doc.child(3).type.name).toBe("paragraph");
-    expect(state.doc.child(3).textContent).toBe("b1"); // later body ejected after
-    expect(state.doc.child(3).attrs.blockId).toBe("c1b1");
+    expect(state.doc.child(1).type.name).toBe("heading"); // BODY0 is the selected line → the heading
+    expect(state.doc.child(1).attrs.level).toBe("pocket");
+    expect(state.doc.child(1).textContent).toBe("b0");
+    expect(state.doc.child(1).attrs.blockId).toBe("c1b0"); // body0 keeps its id onto the heading
+    expect(state.doc.child(2).type.name).toBe("paragraph");
+    expect(state.doc.child(2).textContent).toBe("b1"); // later body ejected after
+    expect(state.doc.child(2).attrs.blockId).toBe("c1b1");
     // caret in the new heading
     expect(state.selection.$from.parent.type.name).toBe("heading");
     expect(state.selection.$from.parent.textContent).toBe("b0");
@@ -977,19 +950,8 @@ describe("setHeadingLevel splits a card at a body paragraph", () => {
     expect(() => state.doc.check()).not.toThrow();
   });
 
-  it("at body0 with an EMPTY cite, the empty cite is SKIPPED (never ejected as an empty paragraph)", () => {
-    const d = mkDoc(aCardMulti("Tag", "", ["b0", "b1"], "c1")); // empty cite
-    const { state } = run(caretInBody(d, 0), setHeadingLevel("hat"));
-    expect(state.doc.childCount).toBe(3); // tag-para, heading(b0), para(b1) — NO empty cite paragraph
-    expect(state.doc.child(0).textContent).toBe("Tag");
-    expect(state.doc.child(1).type.name).toBe("heading");
-    expect(state.doc.child(1).textContent).toBe("b0");
-    expect(state.doc.child(2).textContent).toBe("b1");
-    expect(() => state.doc.check()).not.toThrow();
-  });
-
   it("a caret in the TAG still dissolves the whole card (split only triggers inside the body)", () => {
-    const d = mkDoc(aCardMulti("Tag", "Cite", ["b0", "b1"], "c1"));
+    const d = mkDoc(aCardMulti("Tag", ["b0", "b1"], "c1"));
     const { state } = run(cursorAt(stateOf(d), startOf(d, "tag")), setHeadingLevel("block"));
     expect(countType(state.doc, "card")).toBe(0); // dissolved, NOT split
     expect(state.doc.child(0).textContent).toBe("Tag");
@@ -1003,7 +965,6 @@ describe("setHeadingLevel splits a card at a body paragraph", () => {
     const cardNode = buildCard({
       blockId: "c1",
       tag: [txt("Tag")],
-      cite: [txt("Cite")],
       body: [
         { blockId: "c1b0", content: [txt("plain b0")] },
         { blockId: "c1b1", content: [schema.text("hot", [hl])] }, // targeted → heading
@@ -1028,7 +989,7 @@ describe("setHeadingLevel splits a card at a body paragraph", () => {
   });
 
   it("a NON-EMPTY selection inside one body paragraph splits the same way — the WHOLE paragraph becomes the heading (block-level key)", () => {
-    const d = mkDoc(aCardMulti("Tag", "Cite", ["b0", "b1longer", "b2"], "c1"));
+    const d = mkDoc(aCardMulti("Tag", ["b0", "b1longer", "b2"], "c1"));
     const { start, end } = bodyParaPos(d, 1);
     const { ok, state } = run(rangeAt(stateOf(d), start + 1, end - 2), setHeadingLevel("pocket")); // sub-range of b1
     expect(ok).toBe(true);
@@ -1038,24 +999,23 @@ describe("setHeadingLevel splits a card at a body paragraph", () => {
   });
 
   // A single-body-paragraph card — the one body paragraph (index 0) is the selected line, so IT becomes
-  // the heading; the tag + cite eject above it (the whole card is consumed, no front card survives).
-  it("a single-body-paragraph card promotes that body paragraph to the heading, ejecting tag + cite above it", () => {
-    const d = mkDoc(aCard("Tag", "Cite", "only", "c1")); // aCard builds a one-paragraph body (id c1b)
+  // the heading; the tag ejects above it (the whole card is consumed, no front card survives). (No cite
+  // child to eject — cite is an inline mark in schema v5.)
+  it("a single-body-paragraph card promotes that body paragraph to the heading, ejecting the tag above it", () => {
+    const d = mkDoc(aCard("Tag", "only", "c1")); // aCard builds a one-paragraph body (id c1b)
     const { state } = run(cursorAt(stateOf(d), startOfBodyPara(d, 0)), setHeadingLevel("block"));
     expect(countType(state.doc, "card")).toBe(0);
-    expect(state.doc.childCount).toBe(3); // tag-para, cite-para, heading(only)
+    expect(state.doc.childCount).toBe(2); // tag-para, heading(only)
     expect(state.doc.child(0).type.name).toBe("paragraph");
     expect(state.doc.child(0).textContent).toBe("Tag");
-    expect(state.doc.child(1).type.name).toBe("paragraph");
-    expect(state.doc.child(1).textContent).toBe("Cite");
-    expect(state.doc.child(2).type.name).toBe("heading"); // the body paragraph is the selected line
-    expect(state.doc.child(2).textContent).toBe("only");
-    expect(state.doc.child(2).attrs.blockId).toBe("c1b"); // body paragraph kept its id onto the heading
+    expect(state.doc.child(1).type.name).toBe("heading"); // the body paragraph is the selected line
+    expect(state.doc.child(1).textContent).toBe("only");
+    expect(state.doc.child(1).attrs.blockId).toBe("c1b"); // body paragraph kept its id onto the heading
     expect(() => state.doc.check()).not.toThrow();
   });
 
   it("a selection spanning from a body paragraph into the NEXT top-level block leaves the card intact (range fallback)", () => {
-    const d = mkDoc(aCardMulti("Tag", "Cite", ["b0", "b1"], "c1"), para("after", "p9"));
+    const d = mkDoc(aCardMulti("Tag", ["b0", "b1"], "c1"), para("after", "p9"));
     const from = startOfBodyPara(d, 1);
     const to = d.child(0).nodeSize + 1; // content start of the trailing top-level paragraph "after"
     const { state } = run(rangeAt(stateOf(d), from, to), setHeadingLevel("pocket"));
@@ -1067,7 +1027,7 @@ describe("setHeadingLevel splits a card at a body paragraph", () => {
   });
 
   it("no blockId is duplicated ANYWHERE after a split (descends into the front card's surviving body)", () => {
-    const d = mkDoc(aCardMulti("Tag", "Cite", ["b0", "b1", "b2"], "c1"));
+    const d = mkDoc(aCardMulti("Tag", ["b0", "b1", "b2"], "c1"));
     const { state } = run(cursorAt(stateOf(d), startOfBodyPara(d, 1)), setHeadingLevel("hat"));
     const allIds: string[] = [];
     state.doc.descendants((n) => {
@@ -1082,8 +1042,9 @@ describe("setHeadingLevel splits a card at a body paragraph", () => {
 
 // ── the SELECTED line ALWAYS becomes the heading; everything below it ejects out of the card ──────────
 // Exhaustive caret-position coverage for setHeadingLevel inside a card. The earlier "splits a card at a body
-// paragraph" suite already pins body[k≥1] and body0; this suite pins the TAG and CITE lines (the old bug:
-// caret in cite/tag/body0 always made the TAG the heading) plus the cross-cutting invariants.
+// paragraph" suite already pins body[k≥1] and body0; this suite pins the TAG line plus the cross-cutting
+// invariants. (schema v5: cite is an inline mark, NOT a card line — the old "L = CITE" promotion cases are
+// gone, and no dissolve/split path ever emits a cite paragraph.)
 describe("setHeadingLevel promotes the SELECTED card line to the heading", () => {
   // assert every blockId in the doc (including nested) is unique
   const assertUniqueIds = (state: EditorState): void => {
@@ -1094,101 +1055,52 @@ describe("setHeadingLevel promotes the SELECTED card line to the heading", () =>
     expect(new Set(ids).size).toBe(ids.length);
   };
 
-  it("L = TAG: the tag becomes the heading, a non-empty cite + every body paragraph eject below it (ids kept)", () => {
-    const d = mkDoc(aCardMulti("Tag", "Cite", ["b0", "b1"], "c1"));
+  it("L = TAG: the tag becomes the heading, every body paragraph ejects below it (ids kept, no cite paragraph)", () => {
+    const d = mkDoc(aCardMulti("Tag", ["b0", "b1"], "c1"));
     const { ok, state, dispatches } = run(cursorAt(stateOf(d), startOf(d, "tag")), setHeadingLevel("pocket"));
     expect(ok).toBe(true);
     expect(dispatches).toBe(1);
     expect(countType(state.doc, "card")).toBe(0);
-    expect(state.doc.childCount).toBe(4); // heading(tag), para(cite), para(b0), para(b1)
+    expect(state.doc.childCount).toBe(3); // heading(tag), para(b0), para(b1) — NO cite paragraph
     expect(state.doc.child(0).type.name).toBe("heading");
     expect(state.doc.child(0).attrs.level).toBe("pocket");
     expect(state.doc.child(0).textContent).toBe("Tag");
-    expect(state.doc.child(1).textContent).toBe("Cite");
-    expect(state.doc.child(2).textContent).toBe("b0");
-    expect(state.doc.child(2).attrs.blockId).toBe("c1b0"); // body ids preserved on eject
-    expect(state.doc.child(3).textContent).toBe("b1");
-    expect(state.doc.child(3).attrs.blockId).toBe("c1b1");
+    expect(state.doc.child(1).textContent).toBe("b0");
+    expect(state.doc.child(1).attrs.blockId).toBe("c1b0"); // body ids preserved on eject
+    expect(state.doc.child(2).textContent).toBe("b1");
+    expect(state.doc.child(2).attrs.blockId).toBe("c1b1");
     expect(state.selection.$from.parent.type.name).toBe("heading"); // caret in the new heading
     assertUniqueIds(state);
     expect(() => state.doc.check()).not.toThrow();
   });
 
-  it("L = TAG with an EMPTY cite: the empty cite is SKIPPED (no empty paragraph emitted)", () => {
-    const d = mkDoc(aCardMulti("Tag", "", ["b0"], "c1")); // empty cite
-    const { state } = run(cursorAt(stateOf(d), startOf(d, "tag")), setHeadingLevel("block"));
-    expect(state.doc.childCount).toBe(2); // heading(tag) + para(b0), NO cite paragraph
-    expect(state.doc.child(0).type.name).toBe("heading");
-    expect(state.doc.child(0).textContent).toBe("Tag");
-    expect(state.doc.child(1).textContent).toBe("b0");
-    expect(() => state.doc.check()).not.toThrow();
-  });
-
   // An EMPTY tag is the selected line. The tag still becomes the heading (an empty heading is valid);
-  // the non-empty cite + every body paragraph eject below it, the body KEEPING its id. F4 = setHeadingLevel("pocket").
-  it("L = empty TAG (F4): child(0) is an empty heading, cite + body eject below, body keeps its id, check() passes", () => {
-    const d = mkDoc(aCardMulti("", "Cite", ["b0", "b1"], "c1")); // empty tag, non-empty cite, two body paras
+  // every body paragraph ejects below it, the body KEEPING its id. F4 = setHeadingLevel("pocket").
+  it("L = empty TAG (F4): child(0) is an empty heading, body ejects below keeping its id, check() passes", () => {
+    const d = mkDoc(aCardMulti("", ["b0", "b1"], "c1")); // empty tag, two body paras
     const { ok, state, dispatches } = run(cursorAt(stateOf(d), startOf(d, "tag")), setHeadingLevel("pocket"));
     expect(ok).toBe(true);
     expect(dispatches).toBe(1);
     expect(countType(state.doc, "card")).toBe(0);
-    expect(state.doc.childCount).toBe(4); // empty heading(tag), para(cite), para(b0), para(b1)
+    expect(state.doc.childCount).toBe(3); // empty heading(tag), para(b0), para(b1)
     expect(state.doc.child(0).type.name).toBe("heading"); // the empty tag became the heading
     expect(state.doc.child(0).attrs.level).toBe("pocket");
     expect(state.doc.child(0).content.size).toBe(0); // ...and it is empty
-    expect(state.doc.child(1).type.name).toBe("paragraph"); // the non-empty cite ejected below
-    expect(state.doc.child(1).textContent).toBe("Cite");
-    expect(state.doc.child(2).textContent).toBe("b0");
-    expect(state.doc.child(2).attrs.blockId).toBe("c1b0"); // body kept its id on eject
-    expect(state.doc.child(3).textContent).toBe("b1");
-    expect(state.doc.child(3).attrs.blockId).toBe("c1b1");
+    expect(state.doc.child(1).textContent).toBe("b0");
+    expect(state.doc.child(1).attrs.blockId).toBe("c1b0"); // body kept its id on eject
+    expect(state.doc.child(2).textContent).toBe("b1");
+    expect(state.doc.child(2).attrs.blockId).toBe("c1b1");
     assertUniqueIds(state);
     expect(() => state.doc.check()).not.toThrow();
   });
 
-  it("L = CITE (non-empty), non-empty tag: tag ejects as a paragraph FIRST, cite becomes the heading, bodies follow", () => {
-    const d = mkDoc(aCardMulti("Tag", "Author 2020", ["b0", "b1"], "c1"));
-    const { ok, state, dispatches } = run(cursorAt(stateOf(d), startOf(d, "cite")), setHeadingLevel("hat"));
-    expect(ok).toBe(true);
-    expect(dispatches).toBe(1);
-    expect(countType(state.doc, "card")).toBe(0);
-    expect(state.doc.childCount).toBe(4); // para(tag), heading(cite), para(b0), para(b1)
-    expect(state.doc.child(0).type.name).toBe("paragraph");
-    expect(state.doc.child(0).textContent).toBe("Tag");
-    expect(state.doc.child(1).type.name).toBe("heading"); // the cite is the selected line → the heading
-    expect(state.doc.child(1).attrs.level).toBe("hat");
-    expect(state.doc.child(1).textContent).toBe("Author 2020");
-    expect(state.doc.child(2).textContent).toBe("b0");
-    expect(state.doc.child(2).attrs.blockId).toBe("c1b0");
-    expect(state.doc.child(3).textContent).toBe("b1");
-    expect(state.doc.child(3).attrs.blockId).toBe("c1b1");
-    expect(state.selection.$from.parent.type.name).toBe("heading");
-    expect(state.selection.$from.parent.textContent).toBe("Author 2020");
-    assertUniqueIds(state);
-    expect(() => state.doc.check()).not.toThrow();
-  });
-
-  it("L = CITE (EMPTY): the empty cite still becomes the heading (an empty heading is fine)", () => {
-    const d = mkDoc(aCardMulti("Tag", "", ["b0"], "c1")); // empty cite, but the cite IS the selected line
-    const { state } = run(cursorAt(stateOf(d), startOf(d, "cite")), setHeadingLevel("block"));
-    expect(countType(state.doc, "card")).toBe(0);
-    expect(state.doc.childCount).toBe(3); // para(tag), heading(empty cite), para(b0)
-    expect(state.doc.child(0).type.name).toBe("paragraph");
-    expect(state.doc.child(0).textContent).toBe("Tag");
-    expect(state.doc.child(1).type.name).toBe("heading");
-    expect(state.doc.child(1).content.size).toBe(0); // empty heading from the empty cite
-    expect(state.doc.child(2).textContent).toBe("b0");
-    expect(state.selection.$from.parent.type.name).toBe("heading");
-    expect(() => state.doc.check()).not.toThrow();
-  });
-
-  it("L = body[k≥1]: the FRONT-CARD split is unchanged (front card keeps tag/cite + preceding body)", () => {
-    const d = mkDoc(aCardMulti("Tag", "Cite", ["b0", "b1", "b2"], "c1"));
+  it("L = body[k≥1]: the FRONT-CARD split is unchanged (front card keeps tag + preceding body)", () => {
+    const d = mkDoc(aCardMulti("Tag", ["b0", "b1", "b2"], "c1"));
     const { state } = run(cursorAt(stateOf(d), startOfBodyPara(d, 1)), setHeadingLevel("pocket"));
     expect(countType(state.doc, "card")).toBe(1); // front card survives (this is the k≥1 sub-case)
     expect(state.doc.child(0).type.name).toBe("card");
     expect(state.doc.child(0).attrs.blockId).toBe("c1");
-    expect(state.doc.child(0).child(2).childCount).toBe(1); // only b0 stays in the front card
+    expect(state.doc.child(0).child(1).childCount).toBe(1); // only b0 stays in the front card body (child(1))
     expect(state.doc.child(1).type.name).toBe("heading");
     expect(state.doc.child(1).textContent).toBe("b1");
     expect(state.doc.child(2).textContent).toBe("b2");
@@ -1197,22 +1109,22 @@ describe("setHeadingLevel promotes the SELECTED card line to the heading", () =>
   });
 
   it("a NODE-SELECTED whole card STILL dissolves from the tag (the whole-card path is preserved)", () => {
-    const d = mkDoc(aCardMulti("Tag", "Cite", ["b0", "b1"], "c1"));
+    const d = mkDoc(aCardMulti("Tag", ["b0", "b1"], "c1"));
     const { ok, state } = run(nodeSelAt(stateOf(d), "card"), setHeadingLevel("hat"));
     expect(ok).toBe(true);
     expect(countType(state.doc, "card")).toBe(0);
+    expect(state.doc.childCount).toBe(3); // heading(tag), para(b0), para(b1) — no cite paragraph
     expect(state.doc.child(0).type.name).toBe("heading"); // dissolves with the TAG as the heading
     expect(state.doc.child(0).textContent).toBe("Tag");
-    expect(state.doc.child(1).textContent).toBe("Cite");
-    expect(state.doc.child(2).textContent).toBe("b0");
-    expect(state.doc.child(3).textContent).toBe("b1");
+    expect(state.doc.child(1).textContent).toBe("b0");
+    expect(state.doc.child(2).textContent).toBe("b1");
     assertUniqueIds(state);
     expect(() => state.doc.check()).not.toThrow();
   });
 
   it("blocks BEFORE and AFTER the card are untouched when a card line is promoted", () => {
-    const d = mkDoc(para("before", "p0"), aCardMulti("Tag", "Cite", ["b0", "b1"], "c1"), para("after", "p9"));
-    const { state } = run(cursorAt(stateOf(d), startOf(d, "cite")), setHeadingLevel("pocket"));
+    const d = mkDoc(para("before", "p0"), aCardMulti("Tag", ["b0", "b1"], "c1"), para("after", "p9"));
+    const { state } = run(cursorAt(stateOf(d), startOf(d, "tag")), setHeadingLevel("pocket"));
     expect(state.doc.child(0).type.name).toBe("paragraph");
     expect(state.doc.child(0).textContent).toBe("before");
     expect(state.doc.child(0).attrs.blockId).toBe("p0");
@@ -1250,8 +1162,8 @@ describe("setHeadingLevel selection re-anchor", () => {
 
 // ── convert → dissolve content round-trip ─────────────────────────────────────────────────────────
 describe("convertToTag → dissolveCard content round-trip", () => {
-  it("a claim + its evidence paragraphs survive convert-then-dissolve as text (cite empty => no extra block)", () => {
-    // convertToTag makes cite EMPTY, so dissolve emits NO cite paragraph: the round-trip is
+  it("a claim + its evidence paragraphs survive convert-then-dissolve as text (no cite paragraph)", () => {
+    // schema v5: a card has no cite child, so dissolve emits NO cite paragraph: the round-trip is
     // [claim, ev1, ev2] -> card -> [heading(claim), para(ev1), para(ev2)].
     const d = mkDoc(para("The claim", "p1"), para("Evidence A", "p2"), para("Evidence B", "p3"));
     const converted = run(cursorAt(stateOf(d), startOf(d, "paragraph") + 1), convertToTag()).state;
@@ -1298,14 +1210,14 @@ describe("convertToAnalytic", () => {
   });
 
   it("is a NO-OP (false) on a CARD — never dissolves a card to an analytic", () => {
-    const d = mkDoc(aCard("Tag", "Cite", "Body", "c1"));
+    const d = mkDoc(aCard("Tag", "Body", "c1"));
     const { ok, state } = run(cursorAt(stateOf(d), startOf(d, "tag")), convertToAnalytic());
     expect(ok).toBe(false);
     expect(state.doc.eq(d)).toBe(true);
   });
 
   it("is a NO-OP (false) with the caret inside a card BODY paragraph (a card child is never converted)", () => {
-    const d = mkDoc(aCard("Tag", "Cite", "Body", "c1"));
+    const d = mkDoc(aCard("Tag", "Body", "c1"));
     const { ok, state } = run(cursorAt(stateOf(d), startOfBodyPara(d, 0)), convertToAnalytic());
     expect(ok).toBe(false);
     expect(state.doc.eq(d)).toBe(true);
@@ -1350,7 +1262,7 @@ describe("setHeadingLevel / convertToAnalytic selection-spanning", () => {
   });
 
   it("a CARD inside a multi-block selection is LEFT INTACT (skipped, NOT dissolved)", () => {
-    const d = mkDoc(para("lead", "p1"), aCard("Tag", "Cite", "Body", "c1"), para("trail", "p2"));
+    const d = mkDoc(para("lead", "p1"), aCard("Tag", "Body", "c1"), para("trail", "p2"));
     const { state } = run(spanAll(stateOf(d)), setHeadingLevel("block"));
     // the two paragraphs became headings; the card in the middle survives untouched
     expect(state.doc.child(0).type.name).toBe("heading");
@@ -1363,7 +1275,7 @@ describe("setHeadingLevel / convertToAnalytic selection-spanning", () => {
   });
 
   it("convertToAnalytic spans too: every touched paragraph → analytic; a card in range stays intact", () => {
-    const d = mkDoc(para("a", "p1"), aCard("T", "C", "B", "c1"), para("b", "p2"));
+    const d = mkDoc(para("a", "p1"), aCard("T", "B", "c1"), para("b", "p2"));
     const { state } = run(spanAll(stateOf(d)), convertToAnalytic());
     expect(state.doc.child(0).type.name).toBe("analytic");
     expect(state.doc.child(1).type.name).toBe("card");
@@ -1383,7 +1295,7 @@ describe("setHeadingLevel / convertToAnalytic selection-spanning", () => {
   });
 
   it("a single-block selection still dissolves a card (the caret/single case is unchanged)", () => {
-    const d = mkDoc(aCard("Claim", "Cite", "Body", "c1"));
+    const d = mkDoc(aCard("Claim", "Body", "c1"));
     // a selection fully INSIDE the one card (tag content) is a single-block target → dissolve
     const from = startOf(d, "tag");
     const { state } = run(rangeAt(stateOf(d), from, from), setHeadingLevel("hat"));
@@ -1412,7 +1324,7 @@ describe("NodeSelection-on-card-child guard", () => {
   };
 
   it("setHeadingLevel on a node-selected body paragraph does NOT dissolve the card (no-op, false)", () => {
-    const d = mkDoc(aCardMulti("Tag", "Cite", ["body one", "body two"], "c1"));
+    const d = mkDoc(aCardMulti("Tag", ["body one", "body two"], "c1"));
     const { ok, state } = run(nodeSelBodyPara(stateOf(d), 0), setHeadingLevel("hat"));
     expect(ok).toBe(false); // not handled — must fall through, never nuke the card
     expect(state.doc.eq(d)).toBe(true); // card + every required child intact
@@ -1420,7 +1332,7 @@ describe("NodeSelection-on-card-child guard", () => {
   });
 
   it("convertToAnalytic on a node-selected body paragraph is also a no-op (card intact)", () => {
-    const d = mkDoc(aCardMulti("Tag", "Cite", ["b1"], "c1"));
+    const d = mkDoc(aCardMulti("Tag", ["b1"], "c1"));
     const { ok, state } = run(nodeSelBodyPara(stateOf(d), 0), convertToAnalytic());
     expect(ok).toBe(false);
     expect(state.doc.eq(d)).toBe(true);
@@ -1482,7 +1394,6 @@ describe("clearFormatting block reset", () => {
     const card = buildCard({
       blockId: "c1",
       tag: [txt("Tag")],
-      cite: [txt("Cite")],
       body: [{ blockId: "c1b", content: [schema.text("hot body", [hl.create({ color: "green" })])] }],
     });
     const d = mkDoc(card);
@@ -1491,8 +1402,7 @@ describe("clearFormatting block reset", () => {
     expect(ok).toBe(true);
     expect(countType(state.doc, "card")).toBe(1); // card intact
     expect(state.doc.child(0).type.name).toBe("card"); // NOT reset to a paragraph
-    expect(countType(state.doc.child(0), "tag")).toBe(1);
-    expect(countType(state.doc.child(0), "cite")).toBe(1);
+    expect(countType(state.doc.child(0), "tag")).toBe(1); // required children intact (tag, body — no cite child)
     expect(countType(state.doc.child(0), "body")).toBe(1);
     // the highlight inside the body is gone
     let sawHighlight = false;

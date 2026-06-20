@@ -19,8 +19,9 @@
 //   So we must NOT force a size on every run — if we did, a styled heading run with size 22 would render at 11pt
 //   instead of the style's 52/44/32. Instead:
 //     • the base 11pt body size lives in the DOCUMENT DEFAULTS run props (styles.default.document.run.size),
-//       so plain/cite/body text inherits 11pt with no per-run size;
-//     • a run emits <w:sz> ONLY when the IR set sizeHalfPoints (today: muted, 8pt), so muted still overrides;
+//       so plain/body text inherits 11pt with no per-run size;
+//     • a run emits <w:sz> ONLY when the IR set sizeHalfPoints (muted 8pt, or a cite-marked run 13pt), so
+//       those per-run sizes still override the inherited base;
 //     • a styled heading run carries no size → it correctly inherits the STYLE's size.
 
 import { Document, Packer, Paragraph, TextRun, AlignmentType, UnderlineType, BorderStyle } from "docx";
@@ -58,11 +59,11 @@ function toTextRun(run: DocxRun): TextRun {
 
 /** One IR paragraph → a docx Paragraph. A styled paragraph names its Word STYLE; appearance comes from the
  * style def (size/centre/box/underline/colour), so we set NOTHING else here — no per-paragraph alignment or
- * outline level. Unstyled paragraphs (cite/body/plain) get no style and so never enter the nav pane. */
+ * outline level. Unstyled paragraphs (body/plain) get no style and so never enter the nav pane. */
 function toParagraph(p: DocxParagraph): Paragraph {
   return new Paragraph({
     children: p.runs.map(toTextRun),
-    style: p.styleId, // undefined for cite/body/plain → no <w:pStyle>, no nav-pane entry
+    style: p.styleId, // undefined for body/plain → no <w:pStyle>, no nav-pane entry
   });
 }
 
@@ -138,14 +139,16 @@ const ANALYTIC_PARAGRAPH_STYLE = {
 };
 
 /**
- * Export a Flowline document (`doc.toJSON()`) to a `.docx` byte buffer. Lossy Word-interop lane (the native
- * envelope is the lossless source of truth). Runs in the MAIN process; the caller MUST `await` it before writing.
+ * Build the `docx` `Document` for a Flowline doc (`doc.toJSON()`) — the dependency-on-`docx` heart of export,
+ * SHARED by the node lane (`exportDocx` → Packer.toBuffer) and the web lane (web-docx.ts → Packer.toBlob). It is
+ * pure aside from constructing `docx` objects (no fs, no Buffer), so it bundles for the browser; only the PACK
+ * step (Buffer vs Blob) differs between the two lanes. Factoring it here keeps the style/IR mapping in ONE place.
  */
-export async function exportDocx(docJson: unknown): Promise<Buffer> {
+export function buildDocxDocument(docJson: unknown): Document {
   const ir = docToDocxIR(docJson);
   // An empty document (0 blocks is a valid transient) still must produce a valid .docx — emit one empty paragraph.
   const children = ir.paragraphs.length > 0 ? ir.paragraphs.map(toParagraph) : [new Paragraph({})];
-  const doc = new Document({
+  return new Document({
     styles: {
       // `default` feeds docx's DefaultStylesFactory: `document.run.size` sets the docDefaults run size (11pt body
       // base — see the size-cascade note above), and `headingN` OVERRIDE the built-in heading styles in place
@@ -159,5 +162,12 @@ export async function exportDocx(docJson: unknown): Promise<Buffer> {
     },
     sections: [{ properties: {}, children }],
   });
-  return Packer.toBuffer(doc);
+}
+
+/**
+ * Export a Flowline document (`doc.toJSON()`) to a `.docx` byte buffer. Lossy Word-interop lane (the native
+ * envelope is the lossless source of truth). Runs in the MAIN process; the caller MUST `await` it before writing.
+ */
+export async function exportDocx(docJson: unknown): Promise<Buffer> {
+  return Packer.toBuffer(buildDocxDocument(docJson));
 }

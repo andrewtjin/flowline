@@ -1,8 +1,8 @@
 // renderer/runtime.ts — the editor runtime seam (the product wiring; testable WITHOUT a DOM).
 //
 // `buildEditorRuntime` resolves the editor configuration: the seed document plus the ordered ProseMirror
-// plugin list (prosemirror-history undo, the mark/function-key/block keymaps, click-below, cite placeholder,
-// and the paste guard). No network — a single-user editor.
+// plugin list (prosemirror-history undo, the mark/function-key/block keymaps, click-below, and the paste
+// guard). No network — a single-user editor.
 //
 // WHY a separate seam (not inline in main.ts): the exact plugin order is the correctness-critical part of the
 // editor, and it must be unit-testable without mounting a real EditorView. main.ts becomes a thin shell that
@@ -11,7 +11,7 @@
 import { keymap } from "prosemirror-keymap";
 import { baseKeymap } from "prosemirror-commands";
 import { history, undo, redo } from "prosemirror-history";
-import { Plugin } from "prosemirror-state";
+import { Plugin, type Command } from "prosemirror-state";
 import type { Node as PMNode } from "prosemirror-model";
 import { createSeedDoc } from "../seed";
 import {
@@ -28,9 +28,9 @@ import {
   setHeadingLevel,
   convertToTag,
   convertToAnalytic,
+  toggleCite,
   caretToDocEnd,
 } from "../commands";
-import { citePlaceholderPlugin } from "../cite-placeholder";
 import { pasteGuardPlugin } from "../paste-guard";
 
 /**
@@ -47,7 +47,8 @@ import { pasteGuardPlugin } from "../paste-guard";
  * MOVED here from main.ts: it is part of the renderer plugin list (shared by both modes) and depends only
  * on `caretToDocEnd` + PM — no toolbar coupling — so it belongs with the plugin-building seam.
  */
-export function clickBelowContentPlugin(): Plugin {
+// Internal: built into the plugin list by `buildEditorRuntime` below; no external consumer.
+function clickBelowContentPlugin(): Plugin {
   return new Plugin({
     props: {
       handleDOMEvents: {
@@ -67,14 +68,11 @@ export function clickBelowContentPlugin(): Plugin {
   });
 }
 
-// ── shared plugin sub-lists (DRY across the two modes) ──────────────────────────────────────────────────
+// ── plugin sub-lists ────────────────────────────────────────────────────────────────────────────────────
 //
-// These keymaps are IDENTICAL in single and unit mode (marks, the mark/structural F-keys, the block keymap);
-// clickBelow, cite, and the pasteGuard are shared too. What differs between modes: the UNDO system
-// (prosemirror-history vs session.commands) and the prepended binding/history. NEITHER mode installs a live
-// normalizer — the editor installs no live absorb normalizer (auto-absorb was unwanted).
-// Factored into functions (not module constants) so each mode gets its OWN plugin instances — a Plugin is
-// stateful (it owns per-view binding state), so two EditorStates must never share one instance.
+// The editor installs no live absorb normalizer (auto-absorb was unwanted). Each keymap is factored into a
+// function (not a module constant) so the runtime gets its OWN plugin instances — a Plugin is stateful (it
+// owns per-view binding state), so two EditorStates must never share one instance.
 
 /** Ctrl/Cmd-H toggle highlight (default blue), Ctrl/Cmd-U toggle read-aloud underline. */
 const markKeymap = (): Plugin => keymap({ "Mod-h": toggleHighlight(), "Mod-u": toggleUnderline });
@@ -90,15 +88,20 @@ const markFKeys = (): Plugin =>
     "Mod-b": toggleStrong,
   });
 
-/** Structural conversion F-keys: F4/F5/F6 heading levels, F7 card, Mod-F7 analytic. */
-const structuralFKeys = (): Plugin =>
-  keymap({
-    F4: setHeadingLevel("pocket"),
-    F5: setHeadingLevel("hat"),
-    F6: setHeadingLevel("block"),
-    F7: convertToTag(),
-    "Mod-F7": convertToAnalytic(),
-  });
+/** Structural conversion F-keys: F4/F5/F6 heading levels, F7 card (tag), F8 toggle cite mark, Mod-F7 analytic.
+ * Exported as a binding MAP so the F-key↔command wiring is unit-testable without mounting a view (keymap()
+ * hides its bindings in a closure). Commands are stateless, so the shared map is safe to reuse — keymap() still
+ * returns a fresh (stateful) Plugin per call. F8→toggleCite applies the inline cite mark to the selection (the
+ * Cite toolbar button's "F8" hint stays truthful; schema v5 made cite a mark). */
+export const structuralKeyBindings: Record<string, Command> = {
+  F4: setHeadingLevel("pocket"),
+  F5: setHeadingLevel("hat"),
+  F6: setHeadingLevel("block"),
+  F7: convertToTag(),
+  F8: toggleCite,
+  "Mod-F7": convertToAnalytic(),
+};
+const structuralFKeys = (): Plugin => keymap(structuralKeyBindings);
 
 /** Block keymap: context-aware Enter/Backspace, Mod-Enter inserts a card, Alt-↑/↓ reorder. */
 const blockKeymap = (): Plugin =>
@@ -183,7 +186,7 @@ export interface EditorRuntime {
  * nothing), so it is unit-testable without an EditorView.
  *
  * prosemirror-history is the undo system; the seed is the real product seed doc. The list ends
- * clickBelow → cite → pasteGuard → baseKeymap; there is no live absorb normalizer (auto-absorb of a loose
+ * clickBelow → pasteGuard → baseKeymap; there is no live absorb normalizer (auto-absorb of a loose
  * paragraph into the preceding card on caret-leave was unwanted — it silently restructured the document).
  */
 export function buildEditorRuntime(): EditorRuntime {
@@ -197,8 +200,7 @@ export function buildEditorRuntime(): EditorRuntime {
       structuralFKeys(),
       blockKeymap(),
       clickBelowContentPlugin(),
-      citePlaceholderPlugin(),
-      pasteGuardPlugin(), // paste guard: rebuild a pasted Slice as text + the 5 marks (no structure)
+      pasteGuardPlugin(), // paste guard: rebuild a pasted Slice as text + the 6 marks (no structure)
       keymap(baseKeymap),
     ],
   };

@@ -44,10 +44,14 @@ describe("doc purity", () => {
     const id = () => crypto.randomUUID();
     const doc = schema.nodes.doc.create(null, [
       schema.nodes.heading.create({ blockId: id(), level: "pocket" }, schema.text("H")),
+      // Card is now `tag body` (no cite NODE). The cite MARK is exercised inline on a leading body run,
+      // so "every mark" still includes cite. body is `paragraph+`, so wrap the runs in paragraphs.
       schema.nodes.card.create({ blockId: id() }, [
         schema.nodes.tag.create(null, schema.text("t")),
-        schema.nodes.cite.create(null, schema.text("c")),
-        schema.nodes.body.create(null, schema.text("hot", [schema.marks.highlight.create({ color: "green" })])),
+        schema.nodes.body.create(null, [
+          schema.nodes.paragraph.create({ blockId: id() }, schema.text("Author 24", [schema.marks.cite.create()])),
+          schema.nodes.paragraph.create({ blockId: id() }, schema.text("hot", [schema.marks.highlight.create({ color: "green" })])),
+        ]),
       ]),
       schema.nodes.analytic.create({ blockId: id() }, schema.text("a", [schema.marks.emphasis.create()])),
       schema.nodes.paragraph.create({ blockId: id() }, schema.text("p", [schema.marks.muted.create()])),

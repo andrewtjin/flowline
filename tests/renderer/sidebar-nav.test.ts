@@ -6,11 +6,11 @@
 //   Outline pane: renders Word-nav-pane collapse carets — a caret only on an entry that has deeper
 //       children, and collapsing a heading hides its whole subtree (siblings stay) until it is expanded again.
 //
-// Both panes are exercised through the real createSidebar control surface (DOM-level assertions), mirroring the
-// existing sidebar-room-badge.test.ts pattern. The Outline tests stub getView to expose a fixed doc as state —
-// the Outline pane only reads state.doc (buildOutline) and never mutates on a caret toggle.
+// Both panes are exercised through the real createSidebar control surface (DOM-level assertions). The Outline
+// tests stub getView to expose a fixed doc as state — the Outline pane only reads state.doc (buildOutline) and
+// never mutates on a caret toggle.
 
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import type { EditorView } from "prosemirror-view";
 import type { EditorState } from "prosemirror-state";
 import { schema, buildCard } from "../../src/schema";
@@ -131,5 +131,22 @@ describe("Documents pane — 'this doc' marker", () => {
     const current = sidebar.dom.querySelectorAll(".fl-doc-entry.fl-current");
     expect(current).toHaveLength(1);
     expect(current[0].textContent).toContain("self");
+  });
+
+  it("renders a '+ New document' button at the top that fires onNewDoc when clicked", () => {
+    const onNewDoc = vi.fn();
+    const sidebar = createSidebar({
+      getView: () => { throw new Error("Documents pane must not read the view"); },
+      onFocusWindow: () => {},
+      onNewDoc,
+    });
+    sidebar.setOpenDocs([{ winId: 1, title: "Alpha", dirty: false }]);
+    const newBtn = sidebar.dom.querySelector(".fl-doc-new") as HTMLButtonElement | null;
+    expect(newBtn).not.toBeNull();
+    expect(newBtn!.textContent).toBe("+ New document");
+    // It is the FIRST child of the Documents pane (above the open-windows rows).
+    expect(newBtn!.previousElementSibling).toBeNull();
+    newBtn!.click();
+    expect(onNewDoc).toHaveBeenCalledTimes(1);
   });
 });

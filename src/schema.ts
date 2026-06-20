@@ -30,7 +30,9 @@ export const DEFAULT_HIGHLIGHT_COLOR: HighlightColor = "blue";
 // Debate heading hierarchy expressed as a flat `level` attr (NOT nesting).
 export const HEADING_LEVELS = ["pocket", "hat", "block"] as const;
 export type HeadingLevel = (typeof HEADING_LEVELS)[number];
-export const DEFAULT_HEADING_LEVEL: HeadingLevel = "block";
+// Internal: consumed only within this file (heading spec default + parseDOM fallback). Not part of the
+// module's public surface — every consumer reads heading level off a built node, not this constant.
+const DEFAULT_HEADING_LEVEL: HeadingLevel = "block";
 
 // ── Helpers ──────────────────────────────────────────────────────────────────────────────────
 // parseDOM getAttrs receives `HTMLElement | string`; block rules only ever match elements.
@@ -63,7 +65,9 @@ function requiredBlockId(value: unknown): void {
 }
 
 // ── Nodes ────────────────────────────────────────────────────────────────────────────────────
-export const nodes: Record<string, NodeSpec> = {
+// Internal: fed to `new Schema(...)` below. Consumers read `schema.nodes` off the built instance, never
+// this raw spec map — so it stays module-private.
+const nodes: Record<string, NodeSpec> = {
   // The document root: a flat ordered list of blocks.
   // NOTE: content is `block*`, not `block+`. Every block requires a `blockId` with no
   // default, which makes all block types "non-generatable"; ProseMirror cannot auto-fill a REQUIRED
@@ -73,11 +77,12 @@ export const nodes: Record<string, NodeSpec> = {
   // seed/commands; a momentarily-empty doc is a valid transient state.
   doc: { content: "block*" },
 
-  // Headline evidence card — fixed 3-child structure. Isolating so edits/selection cannot leak
-  // across its boundary; carries a required, stable blockId.
+  // Headline evidence card — fixed tag+body structure (the former `cite` child became an inline `cite`
+  // MARK in schema v5; see the marks block). Isolating so edits/selection cannot leak across its boundary;
+  // carries a required, stable blockId.
   card: {
     group: "block",
-    content: "tag cite body",
+    content: "tag body",
     isolating: true,
     attrs: { blockId: { validate: "string" } }, // no default => REQUIRED (conformance has teeth)
     parseDOM: [{ tag: "div.fl-card", getAttrs: readBlockId }],
@@ -85,16 +90,12 @@ export const nodes: Record<string, NodeSpec> = {
       return ["div", { class: "fl-card", "data-block-id": node.attrs.blockId as string }, 0] as DOMOutputSpec;
     },
   },
-  // Plain interior containers of a card. Not isolating, no attrs. `body` is where read-marks concentrate.
+  // Plain interior container of a card (the claim line). Not isolating, no attrs. `body` is where
+  // read-marks concentrate; the source/cite text now lives inline in tag/body via the `cite` MARK.
   tag: {
     content: "inline*",
     parseDOM: [{ tag: "div.fl-tag" }],
     toDOM() { return ["div", { class: "fl-tag" }, 0] as DOMOutputSpec; },
-  },
-  cite: {
-    content: "inline*",
-    parseDOM: [{ tag: "div.fl-cite" }],
-    toDOM() { return ["div", { class: "fl-cite" }, 0] as DOMOutputSpec; },
   },
   // body is MULTI-PARAGRAPH evidence (`paragraph+`, one-or-more paragraph nodes) instead
   // of `inline*`. Each paragraph is a real isolating block carrying its own blockId; the body itself
@@ -188,7 +189,9 @@ export const nodes: Record<string, NodeSpec> = {
 // external source) while `node.check()` REJECTS it ("Invalid collection of marks"). That is intended: such a
 // transient must be reconciled by a normalizer BEFORE the doc is run through the conformance gate. (Behavior
 // pinned in tests/schema.test.ts.)
-export const marks: Record<string, MarkSpec> = {
+// Internal: fed to `new Schema(...)` below. Consumers read `schema.marks` off the built instance, never
+// this raw spec map — so it stays module-private.
+const marks: Record<string, MarkSpec> = {
   // Read-aloud highlighter (highest-frequency action). `color` is REQUIRED (no schema default) so a
   // highlight missing its color is rejected by the conformance gate; the command/parseDOM default to
   // "blue". inclusive:true => the mark grows when you type at its edge (the inclusive side of the edge-growth pair).
@@ -246,16 +249,30 @@ export const marks: Record<string, MarkSpec> = {
     parseDOM: [{ tag: "strong" }, { tag: "b" }, { tag: "span.fl-strong" }],
     toDOM() { return ["span", { class: "fl-strong" }, 0] as DOMOutputSpec; },
   },
+  // Citation / source label (schema v5): the card's source line rendered INLINE instead of as a dedicated
+  // `cite` card child. A debate card no longer requires a separate cite line — the writer simply marks the
+  // source text with this mark (bold + full size + default ink, matching the `.fl-tag` claim look). Plain
+  // `toggleMark`: no attrs, NO `excludes`, so it layers freely over highlight/underline/strong/emphasis.
+  // inclusive:true so it grows as you keep typing a source. Replaces the former `cite` NODE; old documents
+  // migrate that node into a cite-marked leading body paragraph (persistence/migrations.ts). Innermost in the
+  // render order (rank 5) so a highlight/emphasis still wraps a cite-marked run. NAME NOTE: the mark key is
+  // the plain word `cite` (generic debate vocabulary, explicitly allowed) — never the underscored variant the
+  // clean-room vocabulary gate bans.
+  cite: {
+    inclusive: true,
+    parseDOM: [{ tag: "span.fl-cite" }],
+    toDOM() { return ["span", { class: "fl-cite" }, 0] as DOMOutputSpec; },
+  },
 };
 
 // The single schema instance. Object key order is preserved => mark rank order is
-// highlight(0) < emphasis(1) < muted(2) < underline(3) < strong(4), making highlight the outermost
-// serialized span and strong the innermost.
+// highlight(0) < emphasis(1) < muted(2) < underline(3) < strong(4) < cite(5), making highlight the outermost
+// serialized span and cite the innermost.
 export const schema = new Schema({ nodes, marks });
 
 // ── buildCard helper ──────────────────────────────────────────────────────────────────────────
-// A single place that assembles a card with the new `paragraph+` body, so callers never hand-wire the
-// tag/cite/body child structure (DRY: insertCard/seed migrate onto this). Each body entry becomes one
+// A single place that assembles a card with the `tag body` structure + `paragraph+` body, so callers never
+// hand-wire the child structure (DRY: insertCard/seed migrate onto this). Each body entry becomes one
 // paragraph node carrying its own required blockId.
 
 // One body paragraph: a required blockId and optional inline content (text/marks). Empty `content`
@@ -265,25 +282,32 @@ export interface CardBodyParagraph {
   readonly content?: readonly PMNode[];
 }
 
-// Arguments for buildCard. `tag`/`cite` inline content is optional (empty => empty inline* child).
+// Arguments for buildCard. `tag` inline content is optional (empty => empty inline* child).
 // `body` MUST have >=1 entry to satisfy `paragraph+`; passing `body: []` builds a card that
 // node.check() REJECTS (the structural teeth of the multi-paragraph body).
+//
+// `cite?` is RETAINED only as a documented NO-OP for source-compatibility: schema v5 removed the `cite` card
+// child (cite is now an inline mark), but older fixtures/tests still build cards via `buildCard({cite})`, so the
+// param is accepted and IGNORED rather than removed (which would break those call sites). First-party callers
+// (seed, convertToTag) never pass it; real documents preserve their old cite text via the v4→v5 migration
+// (persistence/migrations.ts), NOT this param.
 export interface BuildCardArgs {
   readonly blockId: string;
   readonly tag?: readonly PMNode[];
+  /** @deprecated schema v5: the cite child is gone (cite is a mark). Accepted but IGNORED — see note above. */
   readonly cite?: readonly PMNode[];
   readonly body: readonly CardBodyParagraph[];
 }
 
-// Assemble a card node from the given parts. Returns a node that passes node.check() when `blockId`
-// is a non-empty id, every body entry has a non-empty blockId, and `body` is non-empty. A `body: []`
-// (zero paragraphs) returns a card whose body violates `paragraph+` and is rejected by check().
+// Assemble a `tag body` card node from the given parts. Returns a node that passes node.check() when
+// `blockId` is a non-empty id, every body entry has a non-empty blockId, and `body` is non-empty. A
+// `body: []` (zero paragraphs) returns a card whose body violates `paragraph+` and is rejected by check().
+// `args.cite` is intentionally ignored (see BuildCardArgs) — a card has no cite child anymore.
 export function buildCard(args: BuildCardArgs): PMNode {
   const tag = schema.nodes.tag.create(null, args.tag ? [...args.tag] : undefined);
-  const cite = schema.nodes.cite.create(null, args.cite ? [...args.cite] : undefined);
   const paragraphs = args.body.map((p) =>
     schema.nodes.paragraph.create({ blockId: p.blockId }, p.content ? [...p.content] : undefined),
   );
   const body = schema.nodes.body.create(null, paragraphs);
-  return schema.nodes.card.create({ blockId: args.blockId }, [tag, cite, body]);
+  return schema.nodes.card.create({ blockId: args.blockId }, [tag, body]);
 }

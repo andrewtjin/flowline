@@ -106,15 +106,59 @@ export const toggleUnderline: Command = toggleMark(schema.marks.underline);
 // so it layers freely over highlight/underline/emphasis/muted (a word can be bold AND highlighted).
 export const toggleStrong: Command = toggleMark(schema.marks.strong);
 
-// The five inline marks Clear (F12) removes. Listed explicitly (not derived from schema.marks) so the
-// set is auditable and a future mark isn't silently swept up. highlight first to match render order.
+// Citation/source (schema v5) — the "Cite" button / F8. Plain `toggleMark` on the cite mark: it applies the
+// bold, full-size cite style to ONLY the current selection, or — at a bare caret — sets a stored mark so the
+// next typed run is cite-styled. NO card is created: cite is an inline mark now, not a structural card child.
+export const toggleCite: Command = toggleMark(schema.marks.cite);
+
+// The six inline marks Clear (F12) removes. Listed explicitly (not derived from schema.marks) so the
+// set is auditable and a future mark isn't silently swept up. highlight first to match render order; cite last.
 const CLEARABLE_MARKS = [
   schema.marks.highlight,
   schema.marks.emphasis,
   schema.marks.muted,
   schema.marks.underline,
   schema.marks.strong,
+  schema.marks.cite,
 ];
+
+/**
+ * Strip every CLEARABLE_MARK from the target into `tr` (no dispatch, no scrollIntoView). The two cases are
+ * byte-identical across clearMarks and clearFormatting, so both delegate here to keep the mark-strip in ONE
+ * place:
+ *  - cursor (`$cursor` non-null, empty selection): clear each stored mark so the next typed run is plain;
+ *  - non-empty selection: remove every CLEARABLE_MARK across each selection range (positions stay valid —
+ *    the strip is size-stable).
+ * Never touches block nodes (no blockId churn). The caller decides return value, dispatch, and scroll.
+ */
+function stripClearableMarks(tr: Transaction, sel: Selection, $cursor: ResolvedPos | null): void {
+  if (sel.empty) {
+    // A bare cursor with no text run ($cursor === null, e.g. a NodeSelection) has no stored-mark target,
+    // so the strip is a no-op there. A real cursor → clear each stored mark.
+    if ($cursor) for (const m of CLEARABLE_MARKS) tr.removeStoredMark(m);
+  } else {
+    for (const r of sel.ranges) for (const m of CLEARABLE_MARKS) tr.removeMark(r.$from.pos, r.$to.pos, m);
+  }
+}
+
+/**
+ * Would stripClearableMarks actually remove a mark here? True iff a CLEARABLE_MARK is present on the target:
+ *  - cursor: any stored/cursor mark whose type is in CLEARABLE_MARKS;
+ *  - non-empty selection: any range carrying a CLEARABLE_MARK.
+ * This is the CLEARABLE-ONLY gate clearFormatting uses to decide whether the mark-strip contributes a change
+ * (so F12 can fall through on a plain target). It is deliberately NARROWER than clearMarks' own cursor gate,
+ * which fires on ANY pending stored mark — hence a predicate distinct from that command's inlined check.
+ */
+function hasClearableMarks(state: EditorState, sel: Selection, $cursor: ResolvedPos | null): boolean {
+  if (sel.empty) {
+    if (!$cursor) return false;
+    const marks = state.storedMarks ?? $cursor.marks();
+    return marks.some((m) => CLEARABLE_MARKS.includes(m.type));
+  }
+  return sel.ranges.some((r) =>
+    CLEARABLE_MARKS.some((m) => state.doc.rangeHasMark(r.$from.pos, r.$to.pos, m)),
+  );
+}
 
 /**
  * clearMarks (F12 / the "Clear" button) — strip every inline mark from the target, leaving the
@@ -124,6 +168,10 @@ const CLEARABLE_MARKS = [
  *    F12 keystroke fall through rather than being silently eaten.
  *  - non-empty selection: remove all CLEARABLE_MARKS across every selected range. Selection is preserved.
  * Never touches block nodes (no blockId churn), so it is safe on any selection shape.
+ *
+ * GATING NOTE: the cursor case reports handled when ANY stored/cursor mark exists (`marks.length`), which is
+ * deliberately BROADER than clearFormatting's clearable-only gate — clearMarks is the low-level "make the
+ * next run plain" vocabulary, so any pending mark counts. The actual strip is shared (stripClearableMarks).
  */
 export const clearMarks: Command = (state, dispatch) => {
   const sel = state.selection;
@@ -135,7 +183,7 @@ export const clearMarks: Command = (state, dispatch) => {
     if (marks.length === 0) return false; // nothing to clear — don't swallow the keystroke
     if (dispatch) {
       const tr = state.tr;
-      for (const m of CLEARABLE_MARKS) tr.removeStoredMark(m);
+      stripClearableMarks(tr, sel, $cursor);
       dispatch(tr);
     }
     return true;
@@ -143,9 +191,7 @@ export const clearMarks: Command = (state, dispatch) => {
 
   if (dispatch) {
     const tr = state.tr;
-    for (const r of sel.ranges) {
-      for (const m of CLEARABLE_MARKS) tr.removeMark(r.$from.pos, r.$to.pos, m);
-    }
+    stripClearableMarks(tr, sel, $cursor);
     dispatch(tr.scrollIntoView());
   }
   return true;
@@ -154,21 +200,21 @@ export const clearMarks: Command = (state, dispatch) => {
 // ── Block commands ─────────────────────────────────────────────────────────────────────────────
 //
 // Design constraint shared by every command below: all four top-level blocks (card/analytic/heading/
-// paragraph) are ISOLATING with a REQUIRED, stable `blockId`, and `card` is a fixed `tag cite body`.
+// paragraph) are ISOLATING with a REQUIRED, stable `blockId`, and `card` is a fixed `tag body`.
 // So NO command here ever splits or merges a block — splitting would have to mint a new blockId and
-// decide which half keeps the old one, and a card's three children can't be split sanely. Instead:
+// decide which half keeps the old one, and a card's children can't be split sanely. Instead:
 //   - structural change = create a brand-new sibling block (fresh blockId) or destroy+recreate one;
 //   - everything else stays at the INLINE level inside the current container.
 // This is what makes "Enter never crosses an isolating boundary" and "Backspace never merges
 // two isolating blocks / deletes a required child" true by construction rather than by luck.
 
 const hard_break = schema.nodes.hard_break;
-// Card construction goes through `buildCard` (schema.ts), which wires the tag/cite/body children — but the
-// unified card-line split needs the `tag`/`cite` TYPES to identify which card child the caret sits in,
-// so they are pulled here alongside the block types this module touches directly.
-const { paragraph, analytic, heading, card, body, tag, cite } = schema.nodes;
+// Card construction goes through `buildCard` (schema.ts), which wires the tag/body children — but the
+// unified card-line split needs the `tag` TYPE to identify when the caret sits in the card's claim line,
+// so it is pulled here alongside the block types this module touches directly.
+const { paragraph, analytic, heading, card, body, tag } = schema.nodes;
 
-/** Mint a fresh unit id through the StructureHost predicate surface (never a node-name string). */
+/** Mint a fresh unit id through the StructureHost predicate surface (clean-room; never a node-name string). */
 const freshBlockId = (): string => structureHost.structure.newUnitId();
 
 /**
@@ -202,8 +248,8 @@ function inBodyParagraph($pos: ResolvedPos): boolean {
  *    each half is its own isolating block with its own blockId, so a run of argument prose becomes
  *    independently-editable analytic lines (Clear/restyle hits exactly one). At END this is observably the
  *    same as a new analytic sibling; at START/MID the content divides across the two blocks;
- *  - collapsed caret inside a card `tag`/`cite`, inside a body paragraph MID-inline, or anywhere else
- *    MID-inline → a `hard_break` (soft line break) inside the current container — `tag`/`cite` never spawn
+ *  - collapsed caret inside a card `tag`, inside a body paragraph MID-inline, or anywhere else
+ *    MID-inline → a `hard_break` (soft line break) inside the current container — the `tag` never spawns
  *    a sibling, and a mid-body-paragraph break stays inside the card (you stay where you are);
  *  - a non-empty selection within ONE textblock → replace it with a `hard_break`;
  *  - a selection spanning textblocks (e.g. tag→body in a card) → swallowed, so the key can never
@@ -261,8 +307,31 @@ export const enter: Command = (state, dispatch) => {
       return true;
     }
 
+    // A collapsed caret at the END of a card TAG → move the caret INTO the start of the card's first body
+    // paragraph (do NOT insert a hard_break — the old fallback rendered a <br> inside the tag that read as a
+    // second tag line). The schema's `card = "tag body"` with `body = "paragraph+"` guarantees a first body
+    // paragraph always exists, so this is always a valid target. We resolve it from the CARD node rather than by
+    // hand-counting tokens: the card opens at `$cursor.before(1)`; its first body paragraph's content begins one
+    // token inside the body, which itself begins one token after the tag closes. Compute that position from the
+    // node sizes (tag size + the body + paragraph open tokens) and snap with TextSelection.near so an EMPTY first
+    // body paragraph still lands a valid caret. No split, no spawn, no break — just a caret move.
+    if (atEnd && $cursor.parent.type === tag && $cursor.node(1).type === card) {
+      if (dispatch) {
+        const cardNode = $cursor.node(1);
+        const cardPos = $cursor.before(1); // position just before the card's open token
+        const tagNode = cardNode.child(0); // child 0 is the tag (card = "tag body")
+        // From cardPos: +1 enters the card (tag open), + tagNode.nodeSize skips the whole tag node, +1 enters the
+        // body (body open), +1 enters the first body paragraph (paragraph open) → its content-start position.
+        const target = cardPos + 1 + tagNode.nodeSize + 1 + 1;
+        const tr = state.tr;
+        tr.setSelection(TextSelection.near(tr.doc.resolve(target), 1));
+        dispatch(tr.scrollIntoView());
+      }
+      return true;
+    }
+
     const container = $cursor.parent.type.name;
-    // tag/cite are intentionally absent: a caret in a card's tag/cite never spawns a sibling block.
+    // tag is intentionally absent: a caret in a card's tag never spawns a sibling block.
     // analytic is intentionally absent too: it is fully owned by the explicit SPLIT branch above.
     const spawns = atEnd && (container === "paragraph" || container === "heading");
     if (spawns) {
@@ -276,7 +345,7 @@ export const enter: Command = (state, dispatch) => {
       }
       return true;
     }
-    // mid-inline collapsed caret, or inside tag/cite → soft line break at the cursor.
+    // mid-inline collapsed caret, or inside the tag → soft line break at the cursor.
     if (dispatch) dispatch(state.tr.replaceSelectionWith(hard_break.create()).scrollIntoView());
     return true;
   }
@@ -296,7 +365,7 @@ export const enter: Command = (state, dispatch) => {
  *    (deleting across a card's required children is never allowed);
  *  - collapsed caret at the START of a card BODY paragraph that is NOT the first → JOIN it with the
  *    previous body paragraph (a within-body merge; both ends stay inside the same `paragraph+` body). At
- *    the FIRST body paragraph it is a NO-OP (a join would pull content into `cite` / threaten the card);
+ *    the FIRST body paragraph it is a NO-OP (a join would pull content toward the `tag` / threaten the card);
  *  - collapsed caret at the very START of a top-level textblock → NO-OP (a join here would merge two
  *    isolating blocks or delete a required card child — forbidden), EXCEPT the blank-line removal below;
  *  - a `hard_break` immediately before the caret → delete it (joins the two inline lines);
@@ -310,7 +379,7 @@ export const backspace: Command = (state, dispatch) => {
     // Only an inline range INSIDE one textblock is a safe delete. A NodeSelection or a single-block
     // AllSelection ALSO satisfies `sameParent` (both ends resolve with the doc as their parent), so we
     // must additionally require a real textblock parent — exactly the guard `enter` uses — or
-    // `deleteSelection()` would wipe a whole isolating block / a card's required tag·cite·body. Every
+    // `deleteSelection()` would wipe a whole isolating block / a card's required tag·body. Every
     // other selection shape (node / all / cross-textblock) is swallowed.
     if (sel instanceof TextSelection && sel.$from.sameParent(sel.$to) && sel.$from.parent.isTextblock) {
       if (dispatch) dispatch(state.tr.deleteSelection().scrollIntoView());
@@ -325,8 +394,8 @@ export const backspace: Command = (state, dispatch) => {
   if ($cursor.parentOffset === 0) {
     // A caret at the START of a card BODY paragraph is handled FIRST. If this is NOT the first body
     // paragraph, JOIN it with the previous body paragraph (a within-body merge — both ends stay inside the
-    // same `paragraph+` body, never crossing the card's isolating boundary and never touching tag/cite). If
-    // it IS the first body paragraph, NO-OP: a join would pull content up into `cite` (a different required
+    // same `paragraph+` body, never crossing the card's isolating boundary and never touching the tag). If
+    // it IS the first body paragraph, NO-OP: a join would pull content up into the `tag` (a different required
     // child) or, at depth, threaten the card — both forbidden. The deletion of the card itself is likewise
     // never reachable here.
     if (inBodyParagraph($cursor)) {
@@ -340,7 +409,7 @@ export const backspace: Command = (state, dispatch) => {
         }
         return true;
       }
-      return true; // first body paragraph → no-op (never merge into cite / destroy the card)
+      return true; // first body paragraph → no-op (never merge into the tag / destroy the card)
     }
 
     // At the very start of a textblock. The general rule is no-op (a join here would merge two
@@ -371,33 +440,27 @@ export const backspace: Command = (state, dispatch) => {
 };
 
 /**
- * insertCard — build a complete card{tag, cite, body} with a fresh blockId in ONE transaction,
- * inserted as the next sibling, caret landing in the chosen child. One tr keeps the create atomic
- * (a card never appears half-built).
+ * insertCard (Mod-Enter) — build a complete `tag body` card with a fresh blockId in ONE transaction,
+ * inserted as the next sibling, caret landing in the empty tag. One tr keeps the create atomic (a card
+ * never appears half-built).
  *
- * body is `paragraph+`, so the card is seeded with EXACTLY ONE empty body paragraph
- * (its own fresh blockId) via `buildCard` — an inline/empty body would violate the schema and be rejected
- * by check(). The caret math is UNCHANGED: tag and cite are still empty, 2-wide, and come first, so the
- * tag content sits at at+2 and the cite content at at+4 regardless of how the body after them is shaped.
- * (Token stream from the card open at `at`: <card> tag </tag> cite </cite> <body> <p> </p> </body> </card>
- *  → at+2 is inside the empty tag, at+4 inside the empty cite.)
+ * body is `paragraph+`, so the card is seeded with EXACTLY ONE empty body paragraph (its own fresh blockId)
+ * via `buildCard` — an inline/empty body would violate the schema and be rejected by check(). The tag is
+ * empty, 2-wide, and comes first, so the tag content sits at at+2 regardless of how the body after it is
+ * shaped. (Token stream from the card open at `at`: <card> tag </tag> <body> <p> </p> </body> </card>
+ *  → at+2 is inside the empty tag.) The source/cite line is no longer a card child — it is the `cite` mark
+ * (toggleCite, below), applied inline; so there is no "caret in cite" variant anymore.
  */
-function makeInsertCard(caretIn: "tag" | "cite"): Command {
-  return (state, dispatch) => {
-    if (dispatch) {
-      const at = siblingInsertPos(state);
-      const node = buildCard({ blockId: freshBlockId(), body: [{ blockId: freshBlockId() }] });
-      const tr = state.tr.insert(at, node);
-      tr.setSelection(TextSelection.create(tr.doc, caretIn === "tag" ? at + 2 : at + 4));
-      dispatch(tr.scrollIntoView());
-    }
-    return true;
-  };
-}
-/** insertCard (Mod-Enter / "Tag" button) — new card, caret in the tag. */
-export const insertCard: Command = makeInsertCard("tag");
-/** insertCardAtCite ("Cite" button) — new card, caret in the cite. */
-export const insertCardAtCite: Command = makeInsertCard("cite");
+export const insertCard: Command = (state, dispatch) => {
+  if (dispatch) {
+    const at = siblingInsertPos(state);
+    const node = buildCard({ blockId: freshBlockId(), body: [{ blockId: freshBlockId() }] });
+    const tr = state.tr.insert(at, node);
+    tr.setSelection(TextSelection.create(tr.doc, at + 2));
+    dispatch(tr.scrollIntoView());
+  }
+  return true;
+};
 
 // Shared body for the single-textblock inserts (analytic/heading/paragraph): insert a fresh empty block
 // of `type` as the next sibling, caret inside it (content start = at + 1).
@@ -559,13 +622,13 @@ function reanchorSelection(tr: Transaction, from: number, to: number): void {
 
 /**
  * dissolveCardTo — eject a card, in doc order: the tag content → a `heading[level]` with a FRESH blockId;
- * a NON-EMPTY cite → a `paragraph` with a FRESH blockId; then each body paragraph → a top-level `paragraph`
- * KEEPING its blockId (a card-body paragraph and a top-level paragraph are the SAME node type, so the node
- * object is RELOCATED as-is — id + content + marks preserved — exactly like splitCardAtBody's trailing-
- * paragraph reuse). The tag/cite are INTERIOR nodes with no blockId, so the blocks minted from them get
- * fresh ids; only the body paragraphs carry identity, so only they keep theirs. ONE replaceWith; caret
- * lands in the new heading. This is the inverse of convertToTag and the ONLY path that touches a structured
- * card here — and it preserves every piece of the card's content, so no required child is silently destroyed.
+ * then each body paragraph → a top-level `paragraph` KEEPING its blockId (a card-body paragraph and a
+ * top-level paragraph are the SAME node type, so the node object is RELOCATED as-is — id + content + marks
+ * preserved — exactly like splitCardAtBody's trailing-paragraph reuse). The tag is an INTERIOR node with no
+ * blockId, so the heading minted from it gets a fresh id; only the body paragraphs carry identity, so only
+ * they keep theirs. ONE replaceWith; caret lands in the new heading. This is the inverse of convertToTag and
+ * the ONLY path that touches a structured card here — and it preserves every piece of the card's content
+ * (any cite-marked source text rides along inside the body), so no required child is silently destroyed.
  */
 function dissolveCardTo(
   state: EditorState,
@@ -576,10 +639,8 @@ function dissolveCardTo(
 ): boolean {
   if (dispatch) {
     const tagNode = cardNode.child(0);
-    const citeNode = cardNode.child(1);
-    const bodyNode = cardNode.child(2);
+    const bodyNode = cardNode.child(1);
     const out: PMNode[] = [heading.create({ blockId: freshBlockId(), level }, tagNode.content)];
-    if (citeNode.content.size > 0) out.push(paragraph.create({ blockId: freshBlockId() }, citeNode.content));
     // Each body paragraph is RELOCATED as a top-level paragraph: the node object is reused verbatim so its
     // blockId (and content + marks) carries onto the ejected top-level paragraph — minting a fresh id here
     // would lose the relocated unit's identity (the card-line-split contract / identity-preserving move shape).
@@ -594,26 +655,25 @@ function dissolveCardTo(
 
 /**
  * The line a structural-restyle gesture targets INSIDE a single card, for the unified card-split. A
- * card's children, in doc order, are [tag, cite, body0, body1, ...]; the user's caret/selection identifies
+ * card's children, in doc order, are [tag, body0, body1, ...]; the user's caret/selection identifies
  * exactly one of them as the SELECTED LINE `L`:
- *   - "tag"  / "cite": L is the tag or the cite (depth 2: doc>card>tag|cite);
+ *   - "tag":  L is the tag (depth 2: doc>card>tag);
  *   - "body": L is a body paragraph at `bodyIndex` (depth 3: doc>card>body>paragraph).
  * The whole card and its doc position are carried so the caller can replace it in one step.
  */
 type CardLine =
   | { card: PMNode; cardPos: number; line: "tag" }
-  | { card: PMNode; cardPos: number; line: "cite" }
   | { card: PMNode; cardPos: number; line: "body"; bodyIndex: number };
 
 /**
  * resolveCardLine — detect a TextSelection caret/selection contained entirely within ONE child of ONE
- * card, and report which child (tag / cite / a specific body paragraph). Returns null for anything that is
+ * card, and report which child (tag / a specific body paragraph). Returns null for anything that is
  * NOT a clean single-line target so the existing guards are preserved:
  *   - a NodeSelection or AllSelection (never splits — the NodeSelection-on-card-child guard and the
  *     node-selected-whole-card dissolve path stay owned by resolveRestyleTarget);
  *   - a selection that spills across two card children (e.g. tag→body) — `sameParent` fails;
  *   - a caret outside any card.
- * cardPos is `$from.before(1)` (the position just before the card's open token). The tag/cite live at depth 2
+ * cardPos is `$from.before(1)` (the position just before the card's open token). The tag lives at depth 2
  * with the card as `$from.node(1)`; a body paragraph lives at depth 3 (detected by `inBodyParagraph`) with
  * the card at `$from.node(1)` and its body index at `$from.index(2)`.
  */
@@ -630,11 +690,10 @@ function resolveCardLine(state: EditorState): CardLine | null {
     return { card: cardNode, cardPos: $from.before(1), line: "body", bodyIndex: $from.index(2) };
   }
 
-  // The tag or the cite (depth 2: doc>card>tag|cite). The parent IS the tag/cite; its parent is the card.
-  if ($from.depth === 2 && $from.node(1).type === card) {
-    const childType = $from.parent.type;
-    if (childType === tag) return { card: $from.node(1), cardPos: $from.before(1), line: "tag" };
-    if (childType === cite) return { card: $from.node(1), cardPos: $from.before(1), line: "cite" };
+  // The tag (depth 2: doc>card>tag). The parent IS the tag; its parent is the card. (The body wrapper holds
+  // no inline content, so a depth-2 text caret inside a card can only be the tag.)
+  if ($from.depth === 2 && $from.node(1).type === card && $from.parent.type === tag) {
+    return { card: $from.node(1), cardPos: $from.before(1), line: "tag" };
   }
   return null; // caret outside any card child (or in the body wrapper itself, which holds no text)
 }
@@ -643,28 +702,22 @@ function resolveCardLine(state: EditorState): CardLine | null {
  * splitCardAtLine — the unified "the SELECTED line becomes the heading, everything below it ejects out
  * of the card" operation. Given the resolved `CardLine`, it builds the doc-order output array and replaces the
  * WHOLE card in ONE replaceWith; the caret lands in the new heading's content. The output depends on which
- * line `L` is (card children, in order, are [tag, cite, body0, body1, ...]):
+ * line `L` is (card children, in order, are [tag, body0, body1, ...]):
  *
- *   L = body[k], k ≥ 1   → FRONT-CARD SPLIT: keep [tag, cite, body0..body(k-1)] as the front card (its
- *                          blockId preserved); body[k] → heading[level] keeping body[k]'s id; body[k+1..] →
+ *   L = body[k], k ≥ 1   → FRONT-CARD SPLIT: keep [tag, body0..body(k-1)] as the front card (its blockId
+ *                          preserved); body[k] → heading[level] keeping body[k]'s id; body[k+1..] →
  *                          top-level paragraphs keeping their ids. (The front card is `paragraph+`-valid
  *                          because k ≥ 1 leaves ≥1 preceding body paragraph.)
- *   L = body[0]          → tag content → a top-level paragraph (fresh id); a NON-EMPTY cite → a top-level
- *                          paragraph (fresh id); body0 → heading[level] keeping body0's id; body1.. →
- *                          top-level paragraphs keeping ids. (The whole card is consumed — no front card.)
- *   L = cite             → tag content → a top-level paragraph (fresh id); cite → heading[level] (fresh id;
- *                          an empty cite yields an empty heading, which is fine); every body paragraph → a
- *                          top-level paragraph keeping its id.
- *   L = tag              → tag content → heading[level] (fresh id); a NON-EMPTY cite → a top-level paragraph
- *                          (fresh id); every body paragraph → a top-level paragraph keeping its id.
- *                          (This equals the legacy dissolveCardTo, reused below.)
+ *   L = body[0]          → tag content → a top-level paragraph (fresh id); body0 → heading[level] keeping
+ *                          body0's id; body1.. → top-level paragraphs keeping ids. (The whole card is
+ *                          consumed — no front card.)
+ *   L = tag              → tag content → heading[level] (fresh id); every body paragraph → a top-level
+ *                          paragraph keeping its id. (This equals the legacy dissolveCardTo, reused below.)
  *
- * Identity rules: body paragraphs are RELOCATED (node objects reused; ids + content preserved). tag/cite are
- * INTERIOR nodes with NO blockId, so any block minted FROM them gets a FRESH id. The selected body
- * paragraph's id carries onto its heading. No blockId is ever duplicated, because each source line appears in
- * exactly one output block. An EMPTY cite is SKIPPED when merely EJECTED (we never emit an empty paragraph
- * from an empty cite) — but if the cite IS the selected line it still becomes the heading even when empty.
- * Every output node is node.check()-valid.
+ * Identity rules: body paragraphs are RELOCATED (node objects reused; ids + content preserved). The tag is an
+ * INTERIOR node with NO blockId, so any block minted FROM it gets a FRESH id. The selected body paragraph's
+ * id carries onto its heading. No blockId is ever duplicated, because each source line appears in exactly one
+ * output block. Every output node is node.check()-valid.
  */
 function splitCardAtLine(
   state: EditorState,
@@ -680,8 +733,7 @@ function splitCardAtLine(
   if (target.line === "body" && target.bodyIndex >= 1) {
     if (dispatch) {
       const tagNode = cardNode.child(0);
-      const citeNode = cardNode.child(1);
-      const bodyNode = cardNode.child(2);
+      const bodyNode = cardNode.child(1);
 
       // Preceding body paragraphs [0 .. k-1] stay in the front card (node objects reused → ids + content kept).
       // bodyIndex ≥ 1 ⇒ this is non-empty, so the front card is `paragraph+`-valid.
@@ -689,7 +741,6 @@ function splitCardAtLine(
       for (let i = 0; i < target.bodyIndex; i++) preceding.push(bodyNode.child(i));
       const frontCard = card.create({ blockId: cardNode.attrs.blockId }, [
         tagNode,
-        citeNode,
         body.create(null, preceding),
       ]);
 
@@ -710,39 +761,23 @@ function splitCardAtLine(
     return true;
   }
 
-  // The tag case is exactly the legacy whole-card dissolve (tag→heading, non-empty cite→paragraph, each body
-  // paragraph→paragraph; fresh ids for the tag/cite-derived blocks). Reuse it to stay DRY.
+  // The tag case is exactly the legacy whole-card dissolve (tag→heading, each body paragraph→paragraph;
+  // fresh id for the tag-derived heading). Reuse it to stay DRY.
   if (target.line === "tag") {
     return dissolveCardTo(state, dispatch, cardNode, cardPos, level);
   }
 
+  // The only remaining target is `body` with bodyIndex 0 (tag is handled above; the body[k≥1] front-card
+  // split is handled above): body0 becomes the heading and the whole card is consumed (no front card).
   if (dispatch) {
     const tagNode = cardNode.child(0);
-    const citeNode = cardNode.child(1);
-    const bodyNode = cardNode.child(2);
-    const out: PMNode[] = [];
-    // The output index of the new heading — tracked explicitly because the number of blocks BEFORE it varies
-    // (an empty cite is skipped in the body0 case), so a fixed index would land the caret in the wrong block.
-    let headingIndex = -1;
-
-    if (target.line === "cite") {
-      // cite is the heading: tag ejects FIRST (fresh-id paragraph), then the cite becomes the heading (fresh
-      // id; empty cite → empty heading is allowed), then every body paragraph ejects (ids kept).
-      out.push(paragraph.create({ blockId: freshBlockId() }, tagNode.content));
-      headingIndex = out.length;
-      out.push(heading.create({ blockId: freshBlockId(), level }, citeNode.content));
-      bodyNode.forEach((p) => out.push(p));
-    } else {
-      // target.line === "body" with bodyIndex 0: body0 is the heading. tag ejects first (fresh-id paragraph),
-      // then a NON-EMPTY cite (empty cite is SKIPPED — never emit an empty paragraph), then body0 → heading
-      // (its id kept), then body1.. eject (ids kept).
-      out.push(paragraph.create({ blockId: freshBlockId() }, tagNode.content));
-      if (citeNode.content.size > 0) out.push(paragraph.create({ blockId: freshBlockId() }, citeNode.content));
-      const body0 = bodyNode.child(0);
-      headingIndex = out.length;
-      out.push(heading.create({ blockId: body0.attrs.blockId, level }, body0.content));
-      for (let i = 1; i < bodyNode.childCount; i++) out.push(bodyNode.child(i));
-    }
+    const bodyNode = cardNode.child(1);
+    // tag ejects first (fresh-id paragraph), then body0 → heading (its id kept), then body1.. eject (ids kept).
+    const out: PMNode[] = [paragraph.create({ blockId: freshBlockId() }, tagNode.content)];
+    const body0 = bodyNode.child(0);
+    const headingIndex = out.length;
+    out.push(heading.create({ blockId: body0.attrs.blockId, level }, body0.content));
+    for (let i = 1; i < bodyNode.childCount; i++) out.push(bodyNode.child(i));
 
     const tr = state.tr.replaceWith(cardPos, cardPos + cardNode.nodeSize, out);
     // Sum the sizes of every output block BEFORE the heading to find its open position; its content starts +1.
@@ -759,14 +794,14 @@ function splitCardAtLine(
  * the pocket/hat/block style buttons. Behaviour by target:
  *
  *  - Caret / selection inside ONE card child → the SELECTED LINE becomes the heading and everything
- *    BELOW it in the card ejects out as top-level paragraphs, in doc order. The selected line may be the tag,
- *    the cite (empty or not), or any body paragraph; identity is preserved (body paragraphs keep their ids;
- *    tag/cite-derived blocks get fresh ids). One transaction; the caret lands in the new heading. This is
- *    checked FIRST so a caret in tag/cite/body0 promotes that exact line rather than always making the TAG
- *    the heading. The body[k≥1] front-card split is one sub-case of this.
- *  - SINGLE target is a NODE-SELECTED whole CARD → DISSOLVE it (the tag becomes the heading; non-empty cite
- *    and every body paragraph eject; fresh ids for tag/cite-derived blocks). A node selection never enters
- *    resolveCardLine, so this whole-card path is preserved unchanged.
+ *    BELOW it in the card ejects out as top-level paragraphs, in doc order. The selected line may be the tag
+ *    or any body paragraph; identity is preserved (body paragraphs keep their ids; the tag-derived heading
+ *    gets a fresh id). One transaction; the caret lands in the new heading. This is checked FIRST so a caret
+ *    in tag/body0 promotes that exact line rather than always making the TAG the heading. The body[k≥1]
+ *    front-card split is one sub-case of this.
+ *  - SINGLE target is a NODE-SELECTED whole CARD → DISSOLVE it (the tag becomes the heading; every body
+ *    paragraph ejects; fresh id for the tag-derived heading). A node selection never enters resolveCardLine,
+ *    so this whole-card path is preserved unchanged.
  *  - SINGLE target is a convertible top-level analytic/heading/paragraph → restyle it INTO a `heading` at
  *    `level`, PRESERVING the blockId (same unit, restyled). An already-heading-at-this-level is idempotent.
  *  - RANGE (selection spanning ≥2 top-level blocks) → restyle EVERY convertible block the selection
@@ -779,7 +814,7 @@ function splitCardAtLine(
 export function setHeadingLevel(level: HeadingLevel): Command {
   return (state, dispatch) => {
     // A caret/selection inside ONE card child promotes THAT line to the heading and ejects everything
-    // below it. Checked first so tag / cite / first-body-paragraph carets promote the selected line instead
+    // below it. Checked first so tag / first-body-paragraph carets promote the selected line instead
     // of falling through to the "tag always becomes the heading" dissolve. Node/all selections and
     // cross-child selections return null here, leaving the whole-card and range paths to resolveRestyleTarget.
     const cardLine = resolveCardLine(state);
@@ -804,7 +839,7 @@ export function setHeadingLevel(level: HeadingLevel): Command {
  * each block's blockId (mirrors setHeadingLevel's NON-card restyle branch). Selection-spanning: every
  * convertible block the selection touches becomes an analytic in ONE transaction.
  *
- * On a CARD or a card CHILD → return false (do NOT dissolve to analytic — an analytic has no tag/cite/body
+ * On a CARD or a card CHILD → return false (do NOT dissolve to analytic — an analytic has no tag/body
  * to receive the card's content). In a multi-block span, cards are simply SKIPPED (left intact), like
  * setHeadingLevel. The NodeSelection-on-card-child guard (resolveRestyleTarget) keeps a child gesture from
  * acting on the whole card.
@@ -866,18 +901,8 @@ export const clearFormatting: Command = (state, dispatch) => {
   const sel = state.selection;
   const $cursor = sel instanceof TextSelection ? sel.$cursor : null;
 
-  // What marks would be cleared (mirrors clearMarks' two cases)?
-  let marksToClear = false;
-  if (sel.empty) {
-    if ($cursor) {
-      const marks = state.storedMarks ?? $cursor.marks();
-      marksToClear = marks.some((m) => CLEARABLE_MARKS.includes(m.type));
-    }
-  } else {
-    marksToClear = sel.ranges.some((r) =>
-      CLEARABLE_MARKS.some((m) => state.doc.rangeHasMark(r.$from.pos, r.$to.pos, m)),
-    );
-  }
+  // What marks would be cleared (the clearable-only gate; see hasClearableMarks)?
+  const marksToClear = hasClearableMarks(state, sel, $cursor);
 
   // Which touched top-level blocks are convertible headings/analytics to reset → paragraph?
   const span = touchedTopLevelRange(state);
@@ -906,13 +931,10 @@ export const clearFormatting: Command = (state, dispatch) => {
     //    structural steps keeps the cursor path byte-identical to clearMarks. setSelection resets
     //    storedMarks, so the stored-mark clear below MUST run after it.
     if (resets.length > 0) reanchorSelection(tr, sel.from, sel.to);
-    // 3) Strip marks, matching clearMarks exactly. Cursor → clear stored marks so the next typed run is
-    //    plain; range → remove every CLEARABLE_MARK across the ranges (positions still valid — size-stable).
-    if (sel.empty) {
-      if ($cursor) for (const m of CLEARABLE_MARKS) tr.removeStoredMark(m);
-    } else {
-      for (const r of sel.ranges) for (const m of CLEARABLE_MARKS) tr.removeMark(r.$from.pos, r.$to.pos, m);
-    }
+    // 3) Strip marks — the SAME size-stable mark-strip clearMarks runs (shared via stripClearableMarks).
+    //    Cursor → clear stored marks so the next typed run is plain; range → remove every CLEARABLE_MARK
+    //    across the ranges (positions still valid after the size-stable resets above).
+    stripClearableMarks(tr, sel, $cursor);
     dispatch(tr.scrollIntoView());
   }
   return true;
@@ -920,7 +942,7 @@ export const clearFormatting: Command = (state, dispatch) => {
 
 /**
  * convertToTag (the "Tag" button / inverse of dissolveCard) — turn the top-level block at the
- * selection's FROM side into a CARD: its inline content becomes the card's `tag`, the `cite` is empty, and
+ * selection's FROM side into a CARD: its inline content becomes the card's `tag`, and
  * the card's body ABSORBS the contiguous following top-level PARAGRAPH siblings — stopping BEFORE the first
  * EMPTY paragraph, the first non-paragraph block, or the doc end. If nothing is absorbable, the body is a
  * single empty paragraph (so the card still satisfies `paragraph+`). ONE transaction (a single replaceWith

@@ -8,12 +8,26 @@ const BLOCKS = ["card", "analytic", "heading", "paragraph"] as const;
 
 describe("schema vocabulary", () => {
   it("defines 4 blocks + card children + text + hard_break", () => {
-    for (const n of ["doc", "card", "tag", "cite", "body", "analytic", "heading", "paragraph", "text", "hard_break"]) {
+    // Card children are now `tag body` (the `cite` NODE was removed in schema v5 — cite is an inline MARK).
+    for (const n of ["doc", "card", "tag", "body", "analytic", "heading", "paragraph", "text", "hard_break"]) {
       expect(schema.nodes[n], `node ${n}`).toBeTruthy();
     }
+    // The structural `cite` node is GONE (replaced by the inline `cite` mark).
+    expect(schema.nodes.cite, "no cite node").toBeUndefined();
   });
-  it("defines exactly 5 marks: highlight, emphasis, muted, underline (v2), strong (v3)", () => {
-    expect(Object.keys(schema.marks).sort()).toEqual(["emphasis", "highlight", "muted", "strong", "underline"]);
+  it("defines exactly 6 marks: highlight, emphasis, muted, underline (v2), strong (v3), cite (v5)", () => {
+    expect(Object.keys(schema.marks).sort()).toEqual(["cite", "emphasis", "highlight", "muted", "strong", "underline"]);
+  });
+  it("cite (v5) is an inclusive inline mark with no attrs and no excludes", () => {
+    expect(schema.marks.cite, "cite mark exists").toBeTruthy();
+    expect(schema.marks.cite.spec.inclusive).toBe(true);
+    expect(schema.marks.cite.spec.attrs).toBeUndefined(); // no attrs
+    // layers freely — excludes nothing (only itself, by default).
+    expect(schema.marks.cite.excludes(schema.marks.highlight)).toBe(false);
+    expect(schema.marks.cite.excludes(schema.marks.emphasis)).toBe(false);
+    expect(schema.marks.cite.excludes(schema.marks.muted)).toBe(false);
+    expect(schema.marks.cite.excludes(schema.marks.underline)).toBe(false);
+    expect(schema.marks.cite.excludes(schema.marks.strong)).toBe(false);
   });
 });
 
@@ -95,10 +109,10 @@ describe("conformance — accepts well-formed, REJECTS malformed", () => {
   });
 
   it("rejects a card missing a required child (body)", () => {
+    // Card content is now `tag body`; a card with ONLY a tag (no body) violates the content model.
     expect(() => {
       const card = schema.nodes.card.create({ blockId: uuid() }, [
         schema.nodes.tag.create(null, schema.text("t")),
-        schema.nodes.cite.create(null, schema.text("c")),
       ]);
       card.check();
     }).toThrow();
@@ -116,26 +130,31 @@ describe("conformance — accepts well-formed, REJECTS malformed", () => {
     expect(() => card.check()).not.toThrow();
   });
 
-  // a multi-paragraph body must survive toJSON/fromJSON identically.
-  it("round-trips a multi-paragraph-body card via toJSON/fromJSON", () => {
+  // a multi-paragraph body must survive toJSON/fromJSON identically — including a cite-MARKED run
+  // (the v5 inline replacement for the old structural cite child).
+  it("round-trips a multi-paragraph-body card (with a cite-marked run) via toJSON/fromJSON", () => {
     const card = buildCard({
       blockId: uuid(),
       tag: [schema.text("claim")],
-      cite: [schema.text("Author 2020")],
       body: [
+        // leading body paragraph carrying the source as an inline cite-marked run.
+        { blockId: uuid(), content: [schema.text("Author 2020", [schema.marks.cite.create()])] },
         { blockId: uuid(), content: [schema.text("first para")] },
         { blockId: uuid(), content: [schema.text("second para")] },
-        { blockId: uuid(), content: [schema.text("third para")] },
       ],
     });
     expect(() => card.check()).not.toThrow();
     const round = Node.fromJSON(schema, card.toJSON());
     expect(round.eq(card)).toBe(true);
-    // sanity: the body really holds 3 paragraph nodes
-    const body = round.child(2);
+    // sanity: card children are now `tag body` (NO cite child) — body is the SECOND child (index 1).
+    expect(round.childCount).toBe(2);
+    expect(round.child(0).type.name).toBe("tag");
+    const body = round.child(1);
     expect(body.type.name).toBe("body");
     expect(body.childCount).toBe(3);
     expect(body.child(0).type.name).toBe("paragraph");
+    // the cite mark survived the round-trip on the leading body run.
+    expect(body.child(0).firstChild!.marks.some((mk) => mk.type === schema.marks.cite)).toBe(true);
   });
 
   // teeth: the paragraph blockId default (null) is a generatability proxy only — a real
@@ -194,10 +213,10 @@ describe("conformance — accepts well-formed, REJECTS malformed", () => {
   });
 });
 
-// The excludes pair behaves differently for a LOCAL edit vs a doc loaded via fromJSON. check() rejects the
-// transient both-marks state that fromJSON tolerates, so an imported/loaded doc must be normalized BEFORE it
-// is validated.
-describe("emphasis<->muted excludes — local vs loaded", () => {
+// The excludes pair behaves differently for LOCAL edits vs a state assembled from an external source.
+// A normalizer must reconcile a transient both-marks doc BEFORE it is validated, because check() rejects the
+// both-marks state that fromJSON tolerates.
+describe("emphasis<->muted excludes — local vs externally-assembled", () => {
   it("local editing cannot put both on one char (addToSet evicts the excluded mark)", () => {
     const set = schema.marks.muted.create().addToSet(schema.marks.emphasis.create().addToSet([]));
     expect(set.map((m) => m.type.name)).toEqual(["muted"]); // last applied wins

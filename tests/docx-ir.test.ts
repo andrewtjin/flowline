@@ -32,6 +32,20 @@ describe("docx-ir marks → run props", () => {
     expect(r.sizeHalfPoints).toBe(16);
   });
 
+  it("cite (v5 inline source mark) → bold + 13pt absolute size", () => {
+    // The cite mark renders the source label as a bold, full-size (13pt = 26 half-points) run.
+    const r = paraIR([schema.text("Author 24", [m.cite.create()])]).paragraphs[0].runs[0];
+    expect(r.bold).toBe(true);
+    expect(r.sizeHalfPoints).toBe(26);
+  });
+
+  it("muted + cite on one run → muted's small size (16) wins over cite's 26", () => {
+    // A run carrying both marks: muted's explicit small size must override cite's source size.
+    const r = paraIR([schema.text("x", [m.muted.create(), m.cite.create()])]).paragraphs[0].runs[0];
+    expect(r.bold).toBe(true); // cite still bolds
+    expect(r.sizeHalfPoints).toBe(16); // muted size wins
+  });
+
   it("emphasis → bold + single underline + a RUN border box", () => {
     const r = paraIR([schema.text("e", [m.emphasis.create()])]).paragraphs[0].runs[0];
     expect(r.bold).toBe(true);
@@ -116,17 +130,17 @@ describe("docx-ir blocks → paragraphs (real Word paragraph STYLES)", () => {
     expect(r.sizeHalfPoints).toBeUndefined();
   });
 
-  it("card TAG → Heading4 style; card cite/body and plain paragraph carry NO style id", () => {
+  it("card TAG → Heading4 style; card body and plain paragraph carry NO style id", () => {
     const doc = schema.nodes.doc.create(null, [
       schema.nodes.paragraph.create({ blockId: id() }, schema.text("p")),
-      buildCard({ blockId: id(), tag: [schema.text("T")], cite: [schema.text("C")], body: [{ blockId: id(), content: [schema.text("b")] }] }),
+      buildCard({ blockId: id(), tag: [schema.text("T")], body: [{ blockId: id(), content: [schema.text("b")] }] }),
     ]);
     const ir = irOf(doc);
-    // plain ¶(1) + card[tag,cite,1 body](3) = 4 paragraphs.
+    // plain ¶(1) + card[tag,1 body](2) = 3 paragraphs (no cite ¶ anymore).
+    expect(ir.paragraphs).toHaveLength(3);
     expect(ir.paragraphs[0].styleId).toBeUndefined(); // plain paragraph
     expect(ir.paragraphs[1].styleId).toBe("Heading4"); // card tag
-    expect(ir.paragraphs[2].styleId).toBeUndefined(); // card cite
-    expect(ir.paragraphs[3].styleId).toBeUndefined(); // card body para
+    expect(ir.paragraphs[2].styleId).toBeUndefined(); // card body para
   });
 
   it("analytic → custom Analytics style (same nav priority as tag, distinct colour/style)", () => {
@@ -153,34 +167,33 @@ describe("docx-ir blocks → paragraphs (real Word paragraph STYLES)", () => {
     expect(r.underline).toBe("single"); // emphasis underline preserved
   });
 
-  it("card → tag ¶ + cite ¶ + one ¶ per body paragraph (2-body card → 4 paragraphs)", () => {
+  it("card → tag ¶ + one ¶ per body paragraph, NO cite ¶ (2-body card → 3 paragraphs)", () => {
     const doc = schema.nodes.doc.create(null, [
       buildCard({
         blockId: id(),
         tag: [schema.text("CLAIM")],
-        cite: [schema.text("Source 26")],
         body: [{ blockId: id(), content: [schema.text("first")] }, { blockId: id(), content: [schema.text("second")] }],
       }),
     ]);
     const ir = irOf(doc);
-    expect(ir.paragraphs).toHaveLength(4);
+    // card[tag, 2 body](3) — the cite NODE is gone, so no dedicated cite paragraph is emitted.
+    expect(ir.paragraphs).toHaveLength(3);
     expect(ir.paragraphs[0].runs[0].text).toBe("CLAIM");
     expect(ir.paragraphs[0].styleId).toBe("Heading4"); // tag → Heading4 style
-    expect(ir.paragraphs[1].runs[0].text).toBe("Source 26");
-    expect(ir.paragraphs[1].styleId).toBeUndefined(); // cite plain, no style
-    expect(ir.paragraphs[2].runs[0].text).toBe("first");
-    expect(ir.paragraphs[3].runs[0].text).toBe("second");
+    expect(ir.paragraphs[1].runs[0].text).toBe("first");
+    expect(ir.paragraphs[1].styleId).toBeUndefined(); // body para plain, no style
+    expect(ir.paragraphs[2].runs[0].text).toBe("second");
   });
 
   it("empty blocks emit empty paragraphs — count == block/body-para count, none dropped", () => {
     const doc = schema.nodes.doc.create(null, [
       schema.nodes.heading.create({ blockId: id() }), // empty heading
-      buildCard({ blockId: id(), body: [{ blockId: id() }] }), // empty tag/cite + one empty body para
+      buildCard({ blockId: id(), body: [{ blockId: id() }] }), // empty tag + one empty body para (no cite child)
       schema.nodes.analytic.create({ blockId: id() }), // empty analytic
     ]);
     const ir = irOf(doc);
-    // heading(1) + card[tag,cite,1 body](3) + analytic(1) = 5 paragraphs
-    expect(ir.paragraphs).toHaveLength(5);
+    // heading(1) + card[tag,1 body](2) + analytic(1) = 4 paragraphs (no cite ¶ anymore)
+    expect(ir.paragraphs).toHaveLength(4);
     expect(ir.paragraphs.every((p) => Array.isArray(p.runs))).toBe(true);
     expect(ir.paragraphs[0].runs).toHaveLength(0); // empty heading → empty paragraph
   });

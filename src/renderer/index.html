@@ -4,6 +4,20 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Flowline</title>
+    <!-- No-flash theme boot (E7-S5). This runs SYNCHRONOUSLY in <head>, BEFORE the deferred module script and
+         before <body> paints, so a dark user never sees a white flash on reload. It reads the SAME persisted key
+         the app uses ('flowline.theme', the single source of truth in settings-registry.ts) and sets
+         documentElement.dataset.theme so the [data-theme="dark"] CSS block applies on first paint. A throwing
+         read (privacy mode) or an empty value leaves the default (light). The app's loadPersistedTheme() re-runs
+         the same resolution through the theme registry once the module loads — this is purely the early paint. -->
+    <script>
+      try {
+        var t = localStorage.getItem("flowline.theme");
+        if (t) document.documentElement.dataset.theme = t;
+      } catch (e) {
+        /* no persisted theme available (privacy mode / non-persistent partition) — default to light */
+      }
+    </script>
   </head>
   <body>
     <div id="fl-root" class="fl-shell">

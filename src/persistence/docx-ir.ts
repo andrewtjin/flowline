@@ -9,9 +9,11 @@
 // MAPPING:
 //   marks  → run props: highlight→w:highlight (FL colour name → Word HighlightColor; blue→cyan, see table),
 //            strong→bold, emphasis→bold + single underline + a RUN border box (w:bdr), underline→single
-//            underline, muted→a small ABSOLUTE size. A run carrying several marks folds them idempotently
-//            (bold set once; one underline; the excludes-tolerant emphasis+muted both apply — box+bold+u AND
-//            small — never throwing). hard_break → an in-run line break, NEVER a new paragraph.
+//            underline, muted→a small ABSOLUTE size, cite→bold + the 13pt tag size (the inline citation/source
+//            style; schema v5). A run carrying several marks folds them idempotently (bold set once; one
+//            underline; muted's small size overrides cite's 13pt so "mud" stays smallest; the excludes-tolerant
+//            emphasis+muted both apply — box+bold+u AND small — never throwing). hard_break → an in-run line
+//            break, NEVER a new paragraph.
 //   blocks → paragraphs (count == block / body-paragraph count; empty blocks emit an empty paragraph, never
 //            dropped). The five "structural" blocks carry a Word paragraph STYLE id (not direct run formatting),
 //            so they appear in Word's NAVIGATION PANE and integrate with Word/Verbatim:
@@ -19,8 +21,8 @@
 //              analytic→Analytics (a custom style based on Heading4, distinct colour).
 //            Those five emit STYLE-ONLY paragraphs: the paragraph names a styleId and its runs carry ONLY
 //            inline-mark-derived props — the block's intrinsic look (bold/size/centre/box/underline/colour)
-//            lives in the STYLE DEFINITION (built in docx.ts), NOT baked into the runs. card.cite, card.body
-//            paragraphs, and plain paragraph stay unstyled (no styleId → never a nav-pane entry).
+//            lives in the STYLE DEFINITION (built in docx.ts), NOT baked into the runs. card.body paragraphs
+//            and plain paragraph stay unstyled (no styleId → never a nav-pane entry).
 //
 // LOSSY-INTEROP NOTE: .docx is the lossy Word lane (the NATIVE envelope is the lossless source of truth). The
 // blue→cyan highlight remap is therefore fine — Word's "blue" highlight is a dark navy that swallows black read
@@ -46,15 +48,15 @@ const HIGHLIGHT_FALLBACK: DocxHighlight = "yellow";
  *   pocket heading  = 26pt = 52 hp   (Heading1)
  *   hat heading     = 22pt = 44 hp   (Heading2)
  *   block heading   = 16pt = 32 hp   (Heading3)
- *   normal/body/cite = 11pt = 22 hp  (DOCX_BASE_HALF_POINTS — now the document DEFAULT run size in docx.ts)
- *   tag / analytic  = 13pt = 26 hp   (Heading4 / Analytics)
+ *   normal/body     = 11pt = 22 hp  (DOCX_BASE_HALF_POINTS — now the document DEFAULT run size in docx.ts)
+ *   tag/analytic/cite = 13pt = 26 hp (Heading4 / Analytics / the inline cite mark)
  *   muted           =  8pt = 16 hp   (always the smallest — overrides a style's size via a run-level override)
  *
  * The structural blocks no longer bake these into runs — the values are EXPORTED so docx.ts can
  * feed them into the Word paragraph-STYLE definitions instead (the style carries the size; an unstyled run then
  * inherits it). MUTED_HALF_POINTS remains a per-run override so "mud" text stays small even inside a heading.
  */
-export const DOCX_BASE_HALF_POINTS = 22; // 11pt — normal paragraph, card cite, card body (docDefaults run size)
+export const DOCX_BASE_HALF_POINTS = 22; // 11pt — normal paragraph, card body (docDefaults run size)
 /** 8pt — debate "mud" text. Still emitted as an explicit per-run size so it overrides the heading style size. */
 export const MUTED_HALF_POINTS = 16;
 /** 13pt — card tag claim line (Heading4) + analytic prose (Analytics, which inherits this from Heading4). */
@@ -126,16 +128,21 @@ interface MarkProps {
   underlineSingle: boolean;
   box: boolean;
   muted: boolean;
+  cite: boolean;
   highlight?: DocxHighlight;
 }
 
 /** Fold a text node's marks into run properties, idempotently (bold/underline set at most once). */
 function foldMarks(marks: readonly JsonMark[] | undefined): MarkProps {
-  const p: MarkProps = { bold: false, underlineSingle: false, box: false, muted: false };
+  const p: MarkProps = { bold: false, underlineSingle: false, box: false, muted: false, cite: false };
   for (const m of marks ?? []) {
     switch (m.type) {
       case "strong":
         p.bold = true;
+        break;
+      case "cite": // citation/source: bold + the 13pt tag size (size applied in makeRun, muted overrides it)
+        p.bold = true;
+        p.cite = true;
         break;
       case "emphasis": // bold + single underline + the box (the excludes-tolerant pair: also keep muted if present)
         p.bold = true;
@@ -172,8 +179,9 @@ function makeRun(text: string, marks: readonly JsonMark[] | undefined): DocxRun 
     underline: f.underlineSingle ? "single" : undefined,
     box: f.box || undefined,
     highlight: f.highlight,
-    // muted forces the small absolute size as a run-level override (overrides the style's size — mud is always small).
-    sizeHalfPoints: f.muted ? MUTED_HALF_POINTS : undefined,
+    // Absolute size as a run-level override: muted forces the small "mud" size (always smallest — it beats
+    // cite); else a cite run lifts to the 13pt tag tier. A plain run gets no override and inherits the doc default.
+    sizeHalfPoints: f.muted ? MUTED_HALF_POINTS : f.cite ? TAG_ANALYTIC_HALF_POINTS : undefined,
   };
 }
 
@@ -197,15 +205,16 @@ const para = (content: readonly JsonNode[] | undefined, styleId?: string): DocxP
   styleId, // the five structural blocks pass a style id; cite/body/plain pass nothing → undefined
 });
 
-/** Find a card's child by type (schema guarantees tag, cite, body — but resolve by type to be robust). */
+/** Find a card's child by type (schema guarantees tag, body — but resolve by type to be robust). */
 function childByType(card: JsonNode, type: string): JsonNode | undefined {
   return (card.content ?? []).find((c) => c.type === type);
 }
 
 /**
  * Map a Flowline document (`doc.toJSON()`) to the Word IR. Paragraph count equals the block / body-paragraph
- * count exactly — empty blocks become empty paragraphs (never dropped); the empty-cite "[citation]" hint is a
- * VIEW decoration and is NOT exported.
+ * count exactly — empty blocks become empty paragraphs (never dropped). A card is `tag body` (schema v5): its
+ * tag claim → a Heading4 paragraph and each body paragraph → a plain paragraph; the cite/source text is an
+ * inline mark folded into the run props (bold + 13pt), NOT a separate paragraph.
  */
 export function docToDocxIR(input: unknown): DocxIR {
   const doc = input as JsonNode; // the caller passes `doc.toJSON()` (a plain serialisable tree)
@@ -228,12 +237,10 @@ export function docToDocxIR(input: unknown): DocxIR {
         break;
       case "card": {
         const tag = childByType(block, "tag");
-        const cite = childByType(block, "cite");
         const body = childByType(block, "body");
         paragraphs.push(para(tag?.content, TAG_STYLE_ID)); // claim line → Heading4 (nav level 4)
-        paragraphs.push(para(cite?.content)); // source line — plain, no style
         for (const bodyPara of body?.content ?? []) {
-          paragraphs.push(para(bodyPara.content)); // one plain ¶ per body paragraph, no style
+          paragraphs.push(para(bodyPara.content)); // one plain ¶ per body paragraph (cite text rides inline)
         }
         break;
       }

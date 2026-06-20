@@ -12,10 +12,10 @@
 // CONTEXT-AWARE materialisation:
 //   - Pasting into a card BODY paragraph → emit one `paragraph` per line (fresh blockIds), so multi-paragraph
 //     evidence survives as multiple body paragraphs (preserving paragraph breaks into the body).
-//   - Anywhere else (tag/cite/analytic/heading, or a top-level paragraph) → emit inline content with a
+//   - Anywhere else (tag/analytic/heading, or a top-level paragraph) → emit inline content with a
 //     `hard_break` between lines, injecting NO new block — so the caret's container never shatters (pasting a
 //     paragraph-bearing slice into an inline-only `tag` otherwise splits the card apart).
-// In BOTH cases the result contains NO card/tag/cite/body/heading/analytic node, so a paste can never inject
+// In BOTH cases the result contains NO card/tag/body/heading/analytic node, so a paste can never inject
 // structure or a duplicate unit id, and the doc stays check()-valid. (Internal copy of a styled block is thus
 // flattened too — deliberate for this minimal guard; structured internal paste is a later, separate concern.)
 
@@ -26,8 +26,8 @@ import type { EditorView } from "prosemirror-view";
 import { schema } from "./schema";
 import { structureHost } from "./structure-host";
 
-/** The marks a paste may keep — the 5 schema marks. Anything else PM parsed is dropped. */
-const ALLOWED_MARKS = new Set(["highlight", "emphasis", "muted", "underline", "strong"]);
+/** The marks a paste may keep — the 6 schema marks. Anything else PM parsed is dropped. */
+const ALLOWED_MARKS = new Set(["highlight", "emphasis", "muted", "underline", "strong", "cite"]);
 
 /** Keep only the supported marks on a pasted text run (they are already schema Mark instances). */
 function filterMarks(marks: readonly Mark[]): readonly Mark[] {
@@ -57,7 +57,7 @@ function sliceToLines(slice: Slice): PMNode[][] {
       } else if (node.isInline) {
         // an unknown inline leaf (none exist in the schema) → drop it
       } else {
-        // a block wrapper (paragraph/card/tag/cite/body/heading/analytic): its boundary is a line break; drop
+        // a block wrapper (paragraph/card/tag/body/heading/analytic): its boundary is a line break; drop
         // the wrapper itself and recurse into its content.
         flush();
         walk(node.content);

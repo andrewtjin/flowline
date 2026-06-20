@@ -58,10 +58,11 @@ describe("envelope round-trip identity", () => {
     roundTrip(createSeedDoc());
   });
 
-  it("round-trips empty paragraph / empty cite / empty body paragraph", () => {
+  it("round-trips empty paragraph / tag-only card / empty body paragraph", () => {
     const doc = schema.nodes.doc.create(null, [
       schema.nodes.paragraph.create({ blockId: id() }), // empty paragraph (no content key in JSON)
-      buildCard({ blockId: id(), tag: [schema.text("t")], cite: undefined, body: [{ blockId: id() }] }), // empty cite + empty body para
+      // Card is now `tag body` (no cite child in v5); an empty-but-valid body paragraph.
+      buildCard({ blockId: id(), tag: [schema.text("t")], body: [{ blockId: id() }] }),
     ]);
     roundTrip(doc);
   });
@@ -190,8 +191,42 @@ describe("envelope typed open errors", () => {
   it("UnsupportedSchema for a newer schemaVersion", () => {
     expectKind(frame({ ...okHeader, schemaVersion: SCHEMA_VERSION + 1 }, goodPayload()), "UnsupportedSchema");
   });
-  it("UnsupportedSchema for an older schemaVersion (no migration yet)", () => {
-    expectKind(frame({ ...okHeader, schemaVersion: SCHEMA_VERSION - 1 }, goodPayload()), "UnsupportedSchema");
+  it("MIGRATES an older (v4) schemaVersion: the cite NODE folds into a cite-marked leading body paragraph", () => {
+    // A v4-shaped payload: a card with the OLD `[tag, cite, body]` structure. Decode must now SUCCEED (the
+    // v4→v5 migration runs), returning a migrated docJson whose card is `[tag, body]` with the cite content
+    // folded into a leading body paragraph carrying the inline `cite` mark.
+    const v4Doc = {
+      type: "doc",
+      content: [
+        {
+          type: "card",
+          attrs: { blockId: id() },
+          content: [
+            { type: "tag", content: [{ type: "text", text: "claim" }] },
+            { type: "cite", content: [{ type: "text", text: "Author 2020" }] },
+            { type: "body", content: [{ type: "paragraph", attrs: { blockId: id() }, content: [{ type: "text", text: "evidence" }] }] },
+          ],
+        },
+      ],
+    };
+    const v4Payload = gzipSync(new TextEncoder().encode(JSON.stringify(v4Doc)));
+    const { header, docJson } = decodeEnvelope(frame({ ...okHeader, schemaVersion: SCHEMA_VERSION - 1 }, v4Payload));
+    expect(header.schemaVersion).toBe(SCHEMA_VERSION - 1); // header stays as-saved; payload was up-migrated
+
+    // The migrated card is `[tag, body]` (cite NODE gone) and validates against the CURRENT schema.
+    const migratedCard = (docJson as { content: { type: string; content: { type: string }[] }[] }).content[0];
+    expect(migratedCard.content.map((c) => c.type)).toEqual(["tag", "body"]);
+    const migratedDoc = docFromJson(docJson); // nodeFromJSON + check() — proves the migrated tree is valid
+    const card = migratedDoc.child(0);
+    expect(card.childCount).toBe(2); // tag + body, no cite child
+    const body = card.child(1);
+    expect(body.type.name).toBe("body");
+    // the cite content became a LEADING body paragraph whose run carries the inline cite mark.
+    const leadRun = body.child(0).firstChild!;
+    expect(leadRun.text).toBe("Author 2020");
+    expect(leadRun.marks.some((mk) => mk.type === schema.marks.cite)).toBe(true);
+    // the original evidence paragraph follows it.
+    expect(body.child(1).textContent).toBe("evidence");
   });
   it("UnsupportedPayloadKind for a non-pm-json payload kind", () => {
     expectKind(frame({ ...okHeader, payloadKind: "future-binary" }, goodPayload()), "UnsupportedPayloadKind");

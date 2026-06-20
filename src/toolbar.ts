@@ -1,6 +1,6 @@
 // toolbar.ts — the mark toolbar: four highlight colour swatches + emphasis + muted.
 //
-// Pure renderer UI, built from `fl-`-classed DOM. Each control runs a mark
+// Pure renderer UI, built from `fl-`-classed DOM (clean-room CSS gate). Each control runs a mark
 // command from `commands.ts` against the live view through `view.dispatch` (the single dispatch seam),
 // then returns focus to the editor so typing continues uninterrupted.
 //
@@ -20,10 +20,10 @@ import {
   toggleMuted,
   toggleUnderline,
   toggleStrong,
+  toggleCite,
   clearFormatting,
   setHeadingLevel,
   convertToTag,
-  insertCardAtCite,
 } from "./commands";
 
 export interface Toolbar {
@@ -104,6 +104,10 @@ function currentHeadingLevel(state: EditorState): HeadingLevel | null {
 // Capitalize a style label ("pocket" -> "Pocket").
 const cap = (s: string): string => s.charAt(0).toUpperCase() + s.slice(1);
 
+// Truthful keyboard hint shown as a gray sublabel on each heading-style button — matches the F4/F5/F6
+// bindings in runtime.ts (structuralKeyBindings). Tag(F7)/Cite(F8)/Underline(F9)/Clear(F12) carry hints inline.
+const STYLE_HINTS: Record<HeadingLevel, string> = { pocket: "F4", hat: "F5", block: "F6" };
+
 export function createToolbar(getView: () => EditorView): Toolbar {
   const dom = elem("div", "fl-toolbar");
 
@@ -116,10 +120,25 @@ export function createToolbar(getView: () => EditorView): Toolbar {
 
   // A labelled text button that runs `cmd` on mousedown (preventDefault keeps the selection). Returns
   // the node so callers can track active state.
-  const toolButton = (label: string, title: string, cls: string, cmd: Command): HTMLButtonElement => {
+  // `hint`, when given, renders a gray/lighter shortcut sublabel (e.g. "F4") as a child span AFTER the label.
+  // The label is set via a TEXT NODE (not b.textContent =, which would clobber the appended hint span). The
+  // hint is display-only — the real binding lives in runtime.ts (structuralKeyBindings / the mark F-keys).
+  const toolButton = (label: string, title: string, cls: string, cmd: Command, hint?: string): HTMLButtonElement => {
     const b = elem("button", `fl-tool ${cls}`.trim());
     b.type = "button";
-    b.textContent = label;
+    // Label lives in its OWN span (not a bare text node) so per-button label styling decorates the WORD only —
+    // the Underline button underlines its label; Emphasis boxes+underlines its label (it self-demonstrates the
+    // mark it applies). Keeping the decoration on `.fl-tool-label` rather than the whole button is what stops it
+    // bleeding onto the gray F-key hint: a CSS ancestor underline cannot be cancelled by a descendant, so the
+    // hint must live OUTSIDE the decorated span — which is exactly why "F10" reads plain inside Emphasis.
+    const labelSpan = elem("span", "fl-tool-label");
+    labelSpan.textContent = label;
+    b.appendChild(labelSpan);
+    if (hint) {
+      const h = elem("span", "fl-tool-hint");
+      h.textContent = hint;
+      b.appendChild(h);
+    }
     b.title = title;
     b.addEventListener("mousedown", (e) => {
       e.preventDefault();
@@ -133,16 +152,19 @@ export function createToolbar(getView: () => EditorView): Toolbar {
   const styleGroup = elem("div", "fl-tool-group fl-style-group");
   const levelBtns: { level: HeadingLevel; node: HTMLButtonElement }[] = [];
   for (const level of HEADING_LEVELS) {
-    const b = toolButton(cap(level), `${cap(level)} heading`, `fl-style fl-style-${level}`, setHeadingLevel(level));
+    const key = STYLE_HINTS[level];
+    const b = toolButton(cap(level), `${cap(level)} heading (${key})`, `fl-style fl-style-${level}`, setHeadingLevel(level), key);
     styleGroup.appendChild(b);
     levelBtns.push({ level, node: b });
   }
   // "Tag" converts the current block into a card (tag = its text), absorbing following paragraphs as the
-  // body — the Verbatim-style "make this a card" action. "Cite" still inserts a fresh empty card
-  // with the caret in the cite line. (A blank-paragraph "Tag" press absorbs nothing, so it reads as
-  // "insert a card here".)
-  styleGroup.appendChild(toolButton("Tag", "Make card from this block (tag)", "fl-style fl-style-tag", convertToTag()));
-  styleGroup.appendChild(toolButton("Cite", "New card (caret in cite)", "fl-style fl-style-cite", insertCardAtCite));
+  // body — the Verbatim-style "make this a card" action. (A blank-paragraph "Tag" press absorbs nothing, so it
+  // reads as "insert a card here".) "Cite" toggles the inline CITE MARK on the selection (bold, full-size
+  // source styling) — it no longer inserts a card; cite is a mark now, so it lights up like the other mark
+  // buttons when the selection carries it.
+  styleGroup.appendChild(toolButton("Tag", "Make card from this block (tag) — F7", "fl-style fl-style-tag", convertToTag(), "F7"));
+  const citeBtn = toolButton("Cite", "Toggle citation — bold source style on the selection (F8)", "fl-style fl-style-cite", toggleCite, "F8");
+  styleGroup.appendChild(citeBtn);
   dom.appendChild(styleGroup);
 
   // Highlight swatches.
@@ -161,17 +183,22 @@ export function createToolbar(getView: () => EditorView): Toolbar {
     group.appendChild(b);
     swatches.push({ color, node: b });
   }
+  // The F11 shortcut toggles highlight (default colour). The swatches are colour-only with no room for a label,
+  // so a gray "F11" hint after them mirrors the F-key sublabels on the other buttons.
+  const highlightHint = elem("span", "fl-tool-hint");
+  highlightHint.textContent = "F11";
+  group.appendChild(highlightHint);
   dom.appendChild(group);
 
   // Mark buttons: bold/strong (B), underline (read marker), emphasis (bold+ul+box), muted (small), and
   // Clear (strip all marks). Tooltips carry the F-key / shortcut hints. All buttons use fl- classes.
   const boldBtn = toolButton("B", "Bold — Ctrl+B", "fl-tool-strong", toggleStrong);
-  const underlineBtn = toolButton("Underline", "Underline — read-aloud marker (F9, Ctrl+U)", "fl-tool-underline", toggleUnderline);
-  const emphasisBtn = toolButton("Emphasis", "Emphasis — bold + underline + box (F10)", "fl-tool-emphasis", toggleEmphasis);
+  const underlineBtn = toolButton("Underline", "Underline — read-aloud marker (F9, Ctrl+U)", "fl-tool-underline", toggleUnderline, "F9");
+  const emphasisBtn = toolButton("Emphasis", "Emphasis — bold + underline + box (F10)", "fl-tool-emphasis", toggleEmphasis, "F10");
   const mutedBtn = toolButton("Muted", "Muted — small, skip-past text (Mod-8)", "fl-tool-muted", toggleMuted);
   // "Clear" runs clearFormatting: strip marks AND reset a heading/analytic to a plain
   // paragraph — the same action F12 performs, so the button and the key stay in lockstep.
-  const clearBtn = toolButton("Clear", "Clear to plain text — strip marks + reset block (F12)", "fl-tool-clear", clearFormatting);
+  const clearBtn = toolButton("Clear", "Clear to plain text — strip marks + reset block (F12)", "fl-tool-clear", clearFormatting, "F12");
   dom.append(boldBtn, underlineBtn, emphasisBtn, mutedBtn, clearBtn);
 
   function syncActive(state: EditorState): void {
@@ -181,6 +208,7 @@ export function createToolbar(getView: () => EditorView): Toolbar {
     underlineBtn.classList.toggle("fl-active", markActive(state, schema.marks.underline));
     emphasisBtn.classList.toggle("fl-active", markActive(state, schema.marks.emphasis));
     mutedBtn.classList.toggle("fl-active", markActive(state, schema.marks.muted));
+    citeBtn.classList.toggle("fl-active", markActive(state, schema.marks.cite));
     const lvl = currentHeadingLevel(state);
     for (const lb of levelBtns) lb.node.classList.toggle("fl-active", lb.level === lvl);
   }

@@ -103,7 +103,7 @@ function selectionBlocks(state: EditorState): Set<number> {
 
 /**
  * Scan `doc` for absorb operations. `candidates` selects which top-level indices to examine as a possible
- * absorbing card: "all" (the full-doc one-shot import-repair) or a specific set (the live caret-leave
+ * absorbing card: "all" (the full-doc adversary / one-shot import-repair) or a specific set (the live caret-leave
  * path). `deferred` is the set of top-level indices the selection currently occupies — a run STOPS before any
  * such paragraph (caret-deferral), so the writer is never interrupted mid-line. The run also stops before any
  * paragraph whose blockId already exists in the target body (no duplicate unit ids — relocation safety).
@@ -131,7 +131,8 @@ function scanAbsorptions(doc: PMNode, candidates: "all" | ReadonlySet<number>, d
     if (node.type !== card) return; // only a card can absorb; paragraphs/headings/analytics never do here
     // Ids already present in this card's body — the run must not introduce a duplicate (relocation safety).
     const ids = new Set<string>();
-    node.child(2).forEach((p) => {
+    node.child(1).forEach((p) => {
+      // card is `tag body` (schema v5): the body wrapper is child(1).
       if (typeof p.attrs.blockId === "string") ids.add(p.attrs.blockId);
     });
     const run: PMNode[] = [];
@@ -161,7 +162,7 @@ function scanAbsorptions(doc: PMNode, candidates: "all" | ReadonlySet<number>, d
 
 /**
  * Turn a list of absorptions into one transaction (or null if there is nothing to do). Each absorb rebuilds
- * the card with its existing tag/cite and a body of [...existing body paragraphs, ...absorbed paragraphs],
+ * the card with its existing tag and a body of [...existing body paragraphs, ...absorbed paragraphs],
  * then replaces [cardPos, spanEnd] with that one card. The rebuild reuses every child node object verbatim, so
  * blockIds + content + marks are preserved and no id is minted. Each replace is exactly size-preserving (the
  * card grows by the paragraphs that leave the top level), so positions computed from the ORIGINAL doc stay
@@ -172,14 +173,12 @@ function applyAbsorptions(state: EditorState, absorptions: readonly Absorption[]
   const tr = state.tr;
   for (const a of absorptions) {
     const tagNode = a.cardNode.child(0);
-    const citeNode = a.cardNode.child(1);
-    const oldBody = a.cardNode.child(2);
+    const oldBody = a.cardNode.child(1); // card is `tag body` (schema v5): body is child(1)
     const bodyParas: PMNode[] = [];
     oldBody.forEach((p) => bodyParas.push(p)); // keep the card's existing body paragraphs
     for (const p of a.paragraphs) bodyParas.push(p); // append the absorbed run (same node objects)
     const newCard = card.create({ blockId: a.cardNode.attrs.blockId }, [
       tagNode,
-      citeNode,
       body.create(null, bodyParas),
     ]);
     tr.replaceWith(a.cardPos, a.spanEnd, newCard);
@@ -190,9 +189,9 @@ function applyAbsorptions(state: EditorState, absorptions: readonly Absorption[]
 const EMPTY_INDEX_SET: ReadonlySet<number> = new Set<number>();
 
 /**
- * The FULL-DOC scan (the one-shot import-repair entry point). Examines EVERY top-level block,
+ * The FULL-DOC scan (test adversary + one-shot import-repair entry point). Examines EVERY top-level block,
  * applies no caret deferral, and reports `touched` so a test can assert it equals the top-level block count —
- * the proof that the full scan really visits every block, not just an adjacency-local subset. The editor
+ * the proof that the normalizer is the real full-scan adversary, not an adjacency-local strawman. The editor
  * would call it explicitly as import-repair; it is never wired to `appendTransaction`.
  */
 export function fullScanNormalize(state: EditorState): { tr: Transaction | null; touched: number } {

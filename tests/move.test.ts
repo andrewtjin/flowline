@@ -14,24 +14,24 @@ import type { Node as PMNode } from "prosemirror-model";
 import { schema } from "../src/schema";
 import { moveBlock, moveCurrentBlock } from "../src/commands";
 
-const { doc, paragraph, analytic, card, tag, cite, body, hard_break } = schema.nodes;
+const { doc, paragraph, analytic, card, tag, body, hard_break } = schema.nodes;
 const { highlight, emphasis } = schema.marks;
 
 const para = (text: string, id: string): PMNode => paragraph.create({ blockId: id }, schema.text(text));
 const anal = (text: string, id: string): PMNode => analytic.create({ blockId: id }, schema.text(text));
 
 // A deliberately rich card: a highlight (with a colour attr), an emphasis mark, and a hard_break — the
-// hardest thing to round-trip deep-equal.
+// hardest thing to round-trip deep-equal. Card content is now `tag body` (the cite NODE was removed in v5),
+// and body is `paragraph+`, so the rich inline content lives in a body paragraph.
 function richCard(id: string): PMNode {
   return card.create({ blockId: id }, [
     tag.create(null, schema.text("Emissions accelerating")),
-    cite.create(null, schema.text("Hansen 24")),
-    body.create(null, [
+    body.create(null, paragraph.create({ blockId: `${id}-b0` }, [
       schema.text("plain "),
       schema.text("hot run", [highlight.create({ color: "yellow" })]),
       hard_break.create(),
       schema.text("stressed", [emphasis.create()]),
-    ]),
+    ])),
   ]);
 }
 
@@ -103,7 +103,7 @@ describe("moveBlock (reorder via destroy + recreate)", () => {
     // And called out explicitly: the blockId is the SAME, not a freshly minted one.
     expect((recreated as PMNode).attrs.blockId).toBe("RICH");
     // The rich content actually survived (guards against eq() passing on a trivially-empty block):
-    // the full card text is tag + cite + body concatenated.
+    // the full card text is tag + body concatenated (no cite child anymore).
     expect((recreated as PMNode).textContent).toContain("plain hot runstressed");
     let breaks = 0;
     (recreated as PMNode).descendants((n) => {

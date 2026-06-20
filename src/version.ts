@@ -12,7 +12,10 @@
 // v3 → v4: card `body` content changed `inline*` → `paragraph+` (multi-paragraph evidence); `paragraph`
 //          gained an explicit `blockId` default (null) so it is generatable in body's required `+`
 //          position (teeth preserved via a requiredBlockId validator). See the paragraph/body notes in src/schema.ts.
-export const SCHEMA_VERSION = 4;
+// v4 → v5: card `cite` NODE removed (card content `tag cite body` → `tag body`); added the inline `cite` MARK
+//          (bold source/citation style). Opening an older `.fl` migrates each card's cite content into a
+//          cite-marked leading body paragraph (persistence/migrations.ts). See src/schema.ts + commands.ts.
+export const SCHEMA_VERSION = 5;
 
 // Informational app version carried in the native file-envelope header.
 export const APP_VERSION = "0.0.0";

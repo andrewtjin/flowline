@@ -20,6 +20,9 @@
   /* Surface tokens. */
   --fl-bg: #f6f7f9;
   --fl-panel: #ffffff;
+  /* The card "paper" surface. Tokenized (not a literal on .fl-card) so the dark theme can recolor the card
+     while light mode stays visually identical (#fcfcfd). See the [data-theme="dark"] override below. */
+  --fl-card-bg: #fcfcfd;
   --fl-ink: #1c1f24;
   --fl-ink-soft: #5b626c;
   --fl-accent: #2b59ff;
@@ -35,6 +38,37 @@
      sans-serif keyword so a missing font never falls back to the serif default. */
   --fl-font: system-ui, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
 }
+
+/* ── Dark theme (E7-S4) ──────────────────────────────────────────────────────────────────────────────────
+   applyTheme('dark') sets [data-theme="dark"] on <html>; this block overrides ONLY the chrome/ink design
+   tokens, so the entire UI (every var(--fl-…) reference above re-resolves). It deliberately DOES NOT touch any
+   --fl-color-* highlight variable: those are Word/OOXML-locked so highlighter colors stay identical in the
+   editor and in the .docx export under both themes (case E7-F3). Tokens overridden = the chrome/ink set only:
+   bg, panel, ink, ink-soft, accent, analytic-ink, line. The values are a dark-slate surface with light ink,
+   a brighter accent for contrast on dark, and a lighter analytic blue that stays legible on the dark panel. */
+[data-theme="dark"] {
+  --fl-bg: #0f1115;        /* app background — deep slate */
+  --fl-panel: #181b21;     /* topbar / cards / inputs — one step up from bg */
+  --fl-card-bg: #1e222a;   /* card "paper" — one step LIGHTER than --fl-panel so a card still reads as a raised sheet */
+  --fl-ink: #e7e9ee;       /* primary text — near-white, not pure white (less glare) */
+  --fl-ink-soft: #9aa1ad;  /* secondary text / hints */
+  --fl-accent: #5b82ff;    /* brighter than light-mode #2b59ff so it pops on dark */
+  --fl-analytic-ink: #8fb0ff; /* analytic blocks — lightened from #1b3a8f to read on dark */
+  --fl-line: #2a2f38;      /* borders / separators — subtle on the dark panel */
+}
+
+/* Highlighted text legibility in dark mode (wet-test fix). The highlight SWATCH colors (--fl-color-*) are
+   Word/OOXML-locked light pastels that must NOT change in dark mode; but card/run ink flips to near-white
+   (--fl-ink) in dark, which would render highlighted runs light-on-pastel = unreadable. Pin highlighted text
+   back to the LIGHT-mode ink literal (#1c1f24, the light `:root` --fl-ink) so highlighted runs stay dark-on-pastel
+   — readable in BOTH themes. We hardcode the literal rather than reference a token because --fl-ink itself is the
+   value being overridden in this block; this re-pins only the text COLOR of highlighted runs, not the swatch. */
+[data-theme="dark"] .fl-highlight { color: #1c1f24; }
+/* A cite-marked run nested inside a highlight renders <span.fl-highlight><span.fl-cite>, and .fl-cite pins its
+   own color to --fl-ink (near-white in dark) — which would re-override the highlight pin above and leave the
+   source ~1.1:1 on the pastel swatch. Re-pin the nested cite to the same light-mode ink literal so it stays
+   dark-on-pastel too. (cite is the only mark that sets its own color and can nest in a highlight.) */
+[data-theme="dark"] .fl-highlight .fl-cite { color: #1c1f24; }
 
 * { box-sizing: border-box; }
 
@@ -68,6 +102,60 @@ body {
 }
 .fl-brand { font-weight: 700; letter-spacing: 0.2px; }
 .fl-brand::before { content: ""; }
+
+/* ── In-renderer application menu bar (File/Edit/View/Window) ──────────────────────────────────────────
+   Renders the native menu's command vocabulary as a themeable DOM bar so the actions are visible on the web
+   build and consistent across platforms (on desktop the native bar is auto-hidden; its accelerators still fire).
+   Everything is driven by the same CSS vars as the rest of the shell, so a theme (E7) restyles it for free. */
+.fl-menubar { display: flex; align-items: center; gap: 2px; margin-left: 18px; }
+.fl-menubar-slot { position: relative; } /* anchors each dropdown directly under its trigger */
+.fl-menubar-trigger {
+  font: inherit;
+  font-size: 0.86em;
+  line-height: 1;
+  padding: 5px 9px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--fl-ink-soft);
+  cursor: pointer;
+  transition: background 0.08s ease, color 0.08s ease, border-color 0.08s ease;
+}
+.fl-menubar-trigger:hover { color: var(--fl-ink); background: var(--fl-bg); }
+.fl-menubar-trigger.fl-menubar-open { color: var(--fl-ink); background: var(--fl-bg); border-color: var(--fl-line); }
+
+.fl-menu-dropdown {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 50;
+  min-width: 188px;
+  padding: 5px;
+  background: var(--fl-panel);
+  border: 1px solid var(--fl-line);
+  border-radius: var(--fl-radius);
+  box-shadow: 0 8px 24px rgba(16, 24, 40, 0.18);
+}
+.fl-menu-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  width: 100%;
+  font: inherit;
+  font-size: 0.88em;
+  text-align: left;
+  padding: 6px 9px;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--fl-ink);
+  cursor: pointer;
+}
+.fl-menu-item:hover { background: var(--fl-accent); color: #fff; }
+.fl-menu-item-hint { font-size: 0.85em; color: var(--fl-ink-soft); opacity: 0.85; }
+.fl-menu-item:hover .fl-menu-item-hint { color: rgba(255, 255, 255, 0.78); }
+.fl-menu-sep { height: 1px; margin: 5px 6px; background: var(--fl-line); }
 
 /* ── Mark toolbar ────────────────────────────────────────────────────────────
    Sits at the right of the topbar: four colour swatches, then emphasis + muted. */
@@ -105,8 +193,24 @@ body {
 }
 .fl-tool:hover { border-color: var(--fl-accent); }
 .fl-tool.fl-active { background: var(--fl-accent); border-color: var(--fl-accent); color: #fff; }
-.fl-tool-emphasis { font-weight: 700; text-decoration: underline; }
 .fl-tool-strong { font-weight: 700; } /* the "B" button reads bold */
+/* The Underline & Emphasis buttons self-demonstrate their mark on the LABEL word — Underline = underlined,
+   Emphasis = bold + underline + box (mirrors the .fl-emphasis mark) — so the button shows what it applies. The
+   decoration sits on `.fl-tool-label` (the word), NEVER the whole button, so the gray F-key hint stays plain
+   (an ancestor underline can't be removed by a descendant; the hint is kept out of the decorated span). */
+.fl-tool-underline .fl-tool-label { text-decoration: underline; }
+.fl-tool-emphasis .fl-tool-label {
+  font-weight: 700;
+  text-decoration: underline;
+  outline: 1.5px solid currentColor;
+  outline-offset: 1px;
+  border-radius: 0; /* sharp box, matching the in-document emphasis mark */
+}
+/* Gray shortcut-key sublabel inside a tool button (e.g. "F4") — lighter + smaller than the label, display-only.
+   `inline-block` makes it its own decorating box, so a future button-level text-decoration can never bleed in.
+   On an active (accent-filled) button it lightens to stay legible on the dark fill. */
+.fl-tool-hint { display: inline-block; margin-left: 6px; font-size: 0.85em; font-weight: 400; text-decoration: none; color: var(--fl-ink-soft); opacity: 0.85; }
+.fl-tool.fl-active .fl-tool-hint { color: rgba(255, 255, 255, 0.72); opacity: 1; }
 
 /* The editor surface is the SINGLE scroll region — the shell itself never scrolls, so the topbar/sidebar/
    strip stay put while a long document scrolls here. `min-height: 0` lets this flex child shrink below its
@@ -120,7 +224,7 @@ body {
 /* ── Shell row + sidebar + bottom strip (ADDITIVE-ONLY) ──────────────────────────────────────────────
    .fl-main-row is the horizontal band under the topbar: [sidebar | content column]. The content column
    stacks the centered editor surface over the thin bottom strip. The rules above (html,body / body /
-   .fl-surface / .ProseMirror) are untouched by these additive shell classes. */
+   .fl-surface / .ProseMirror) are untouched. */
 .fl-main-row { display: flex; flex: 1; min-height: 0; }
 .fl-content-col { display: flex; flex-direction: column; flex: 1; min-width: 0; min-height: 0; }
 
@@ -195,6 +299,127 @@ body {
 .fl-doc-entry.fl-current { background: rgba(43, 89, 255, 0.08); font-weight: 600; }
 .fl-doc-entry.fl-current:hover { background: rgba(43, 89, 255, 0.12); }
 .fl-doc-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1 1 auto; }
+
+/* ── Web in-window MDI Documents pane (E10b) ──────────────────────────────────────────────────────────
+   The web build lists open docs in ONE window: a "+ New document" button + rows with a clickable title (switch)
+   and an × (close). Classes fl-prefixed (CSS gate). Reuses the .fl-doc-entry row shell above. */
+.fl-doc-new {
+  display: block;
+  width: 100%;
+  font: inherit;
+  font-size: 0.84em;
+  text-align: left;
+  padding: 6px 8px;
+  margin-bottom: 4px;
+  border: 1px dashed var(--fl-line);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--fl-ink-soft);
+  cursor: pointer;
+}
+.fl-doc-new:hover { color: var(--fl-accent); border-color: var(--fl-accent); }
+/* The title becomes a borderless button on web (it is the switch affordance); keep it visually identical to the
+   desktop title span so the two panes read the same. */
+.fl-doc-switch {
+  font: inherit;
+  font-size: inherit;
+  text-align: left;
+  border: none;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  padding: 0;
+}
+/* The per-row close ×: a small muted glyph that brightens on hover; sits on the right of the row. */
+.fl-doc-close {
+  flex: 0 0 auto;
+  font: inherit;
+  font-size: 1.1em;
+  line-height: 1;
+  border: none;
+  background: transparent;
+  color: var(--fl-ink-soft);
+  cursor: pointer;
+  padding: 0 4px;
+  border-radius: 4px;
+}
+.fl-doc-close:hover { color: var(--fl-ink); background: var(--fl-bg); }
+
+/* ── Web error toast (E10b) ────────────────────────────────────────────────────────────────────────────
+   The web build has no native error dialog, so file/open errors show a dismissible banner pinned top-centre.
+   Classes fl-prefixed (CSS gate). Auto-removes after a few seconds (see webShowError). */
+.fl-toast {
+  position: fixed;
+  top: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  max-width: 520px;
+  padding: 10px 14px;
+  border: 1px solid var(--fl-line);
+  border-radius: 8px;
+  /* --fl-panel (not the undefined --fl-surface) so the toast surface tracks the theme like the modal/menu
+     surfaces; an undefined token resolves to transparent → near-white text ghosted on the dark page. */
+  background: var(--fl-panel);
+  color: var(--fl-ink);
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.18);
+  font-size: 0.9em;
+}
+.fl-toast-close {
+  flex: 0 0 auto;
+  font: inherit;
+  font-size: 1.1em;
+  line-height: 1;
+  border: none;
+  background: transparent;
+  color: var(--fl-ink-soft);
+  cursor: pointer;
+  padding: 0 2px;
+}
+.fl-toast-close:hover { color: var(--fl-ink); }
+/* Success variant (e.g. "Saved t.fl"): a left accent edge marks it as a confirmation, not an error/alert. */
+.fl-toast--ok { border-left: 3px solid var(--fl-accent); }
+
+/* ── Shared overlay (E7-S3) ───────────────────────────────────────────────────────────────────────────
+   The single dim full-screen backdrop behind the Settings overlay (settings.ts `openOverlay`). One latch ⇒
+   only one overlay is ever open at a time. The `.fl-overlay__dialog` is the base centered card; Settings
+   (.fl-settings) refines its size/padding. Reuses the surface/line/ink tokens so it tracks the theme. */
+.fl-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 100; /* above the sticky topbar (z-index:10) and everything else */
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(16, 24, 40, 0.4); /* dim backdrop */
+}
+.fl-overlay__dialog {
+  background: var(--fl-panel);
+  border: 1px solid var(--fl-line);
+  border-radius: var(--fl-radius);
+  box-shadow: 0 8px 24px rgba(16, 24, 40, 0.28);
+}
+
+/* ── Lightweight modal (the web unsaved-changes prompt) ────────────────────────────────────────────────
+   The modal BODY (title + actions) inside .fl-overlay__dialog (which provides the panel/border/shadow);
+   these rules add the column layout + sizing. Reuses the .fl-tool button style for its action row. */
+.fl-modal__dialog {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  width: 360px;
+  max-width: calc(100vw - 32px);
+  padding: 20px;
+  background: var(--fl-panel);
+  border: 1px solid var(--fl-line);
+  border-radius: var(--fl-radius);
+  box-shadow: 0 8px 24px rgba(16, 24, 40, 0.18);
+}
+.fl-modal__title { margin: 0; font-size: 1.05em; font-weight: 700; color: var(--fl-ink); }
+.fl-modal__actions { display: flex; justify-content: flex-end; gap: 8px; }
 
 /* Outline pane: each row is [collapse caret | navigable label], indented by tier (data-tier 0..3) so the
    hierarchy reads at a glance. The caret folds a heading's deeper children like Word's navigation pane. */
@@ -301,24 +526,15 @@ body {
   border: 1px solid var(--fl-line);
   border-left: 3px solid var(--fl-accent);
   border-radius: 8px;
-  background: #fcfcfd;
+  background: var(--fl-card-bg);
 }
-/* Card lead-in: tag = bold claim line (13pt, matching analytic tier); cite = source/author line (11pt). */
+/* Card lead-in: tag = bold claim line (13pt, matching analytic tier). */
 .fl-tag { font-weight: 700; font-size: 13pt; }
-.fl-cite { font-size: 11pt; color: var(--fl-ink-soft); margin: 2px 0 6px; }
-/* Empty-cite placeholder hint. A VIEW decoration (cite-placeholder.ts) adds .fl-cite--placeholder to
-   an empty, unfocused cite; this ::before renders the hint so a card built without a cite shows where the
-   source line goes. pointer-events/user-select: none so it never blocks the click that focuses the cite
-   (which then hides it) and is never selectable or copied. The hint also vanishes the moment the cite has
-   content (typed/pasted), and returns when the cite is empty and unfocused again. */
-.fl-cite--placeholder::before {
-  content: "[citation]";
-  color: var(--fl-ink-soft);
-  font-style: italic;
-  opacity: 0.6;
-  pointer-events: none;
-  user-select: none;
-}
+/* Cite MARK (schema v5): the inline citation/source style — bold, full size (13pt, the tag claim tier),
+   default ink (black). Toggled on a selection via the "Cite" button / F8; it replaces the former dedicated
+   cite line + the "[citation]" placeholder. As an inline span the font-size lifts the cited run to the tag
+   tier; color is pinned to --fl-ink so a source still reads black inside softer-toned surroundings. */
+.fl-cite { font-weight: 700; font-size: 13pt; color: var(--fl-ink); }
 /* Body is a block wrapper holding one-or-more paragraphs (paragraph+). Lay it out as a
    block and inherit the sans font; its child .fl-paragraph nodes carry their own spacing. */
 .fl-body { display: block; font-family: var(--fl-font); }
@@ -369,3 +585,84 @@ body {
 /* Bold/strong (schema v3): plain heavier weight (the Ctrl+B "B" affordance), distinct from emphasis's
    bold+underline+box. Layers freely with every other mark. */
 .fl-strong { font-weight: 700; }
+
+/* ── Settings (E7-S6) ────────────────────────────────────────────────────────────────────────────────────
+   The always-present topbar gear, and the Settings overlay shell (rail of section titles + a section pane).
+   All tokens are themeable so the whole shell tracks light/dark. */
+
+/* The always-present ⚙ Settings gear in the topbar. A compact square button so the topbar reads consistently. */
+.fl-settings-gear {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  margin-left: auto; /* push the settings gear to the right edge of the topbar */
+  padding: 0;
+  border: 1px solid var(--fl-line);
+  border-radius: 6px;
+  background: var(--fl-panel);
+  color: var(--fl-ink-soft);
+  cursor: pointer;
+  font-size: 15px;
+  line-height: 1;
+  transition: border-color 0.08s ease, color 0.08s ease;
+}
+.fl-settings-gear:hover { border-color: var(--fl-accent); color: var(--fl-ink); }
+
+/* The Settings dialog: wider than the narrow modal, with a header + a [rail | pane] body. Sits inside
+   .fl-overlay__dialog (panel/border/shadow); these rules size it and lay out the two columns. */
+.fl-settings {
+  display: flex;
+  flex-direction: column;
+  width: 560px;
+  max-width: calc(100vw - 32px);
+  max-height: calc(100vh - 64px);
+  overflow: hidden;
+}
+.fl-settings__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--fl-line);
+}
+.fl-settings__title { margin: 0; font-size: 1.1em; font-weight: 700; color: var(--fl-ink); }
+.fl-settings__close {
+  border: none;
+  background: none;
+  color: var(--fl-ink-soft);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 4px 6px;
+  border-radius: 6px;
+}
+.fl-settings__close:hover { color: var(--fl-ink); background: var(--fl-bg); }
+
+/* Body: every section stacked on ONE scrollable page (no rail — user 2026-06-19, "don't make two panes"). Each
+   registered section paints its own field group; adjacent groups are separated by a divider. */
+.fl-settings__body { display: flex; flex-direction: column; padding: 4px 20px 16px; overflow: auto; }
+.fl-settings__group { padding: 16px 0; }
+.fl-settings__group + .fl-settings__group { border-top: 1px solid var(--fl-line); }
+.fl-settings__field-label { font-size: 0.9em; font-weight: 600; color: var(--fl-ink-soft); margin-bottom: 10px; }
+
+/* Appearance section's theme picker: a row of selectable theme buttons; the active one is highlighted. */
+.fl-settings__theme-picker { display: flex; gap: 10px; flex-wrap: wrap; }
+.fl-settings__theme-option {
+  border: 1px solid var(--fl-line);
+  background: var(--fl-panel);
+  color: var(--fl-ink);
+  font: inherit;
+  font-size: 0.95em;
+  padding: 8px 16px;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: border-color 0.08s ease;
+}
+.fl-settings__theme-option:hover { border-color: var(--fl-accent); }
+.fl-settings__theme-option.fl-active {
+  border-color: var(--fl-accent);
+  box-shadow: 0 0 0 1px var(--fl-accent);
+  font-weight: 600;
+}

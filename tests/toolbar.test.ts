@@ -8,7 +8,7 @@ import { describe, it, expect } from "vitest";
 import { EditorState, TextSelection } from "prosemirror-state";
 import { schema } from "../src/schema";
 import { toggleHighlight } from "../src/commands";
-import { activeHighlightColor } from "../src/toolbar";
+import { activeHighlightColor, createToolbar } from "../src/toolbar";
 
 const hl = schema.marks.highlight;
 
@@ -78,5 +78,59 @@ describe("activeHighlightColor", () => {
     let s = EditorState.create({ schema, doc });
     s = s.apply(s.tr.setSelection(TextSelection.create(s.doc, 1, s.doc.content.size - 1)));
     expect(activeHighlightColor(s)).toBe("lightGray");
+  });
+});
+
+describe("toolbar shortcut hints (E6)", () => {
+  // createToolbar builds every button synchronously; getView is only read on a click, so a never-called stub
+  // lets us inspect the rendered DOM with no real EditorView.
+  const build = (): HTMLElement =>
+    createToolbar((() => {
+      throw new Error("view not needed for hint render");
+    }) as unknown as () => import("prosemirror-view").EditorView).dom;
+
+  const hintOf = (dom: HTMLElement, sel: string): string | null =>
+    dom.querySelector(`${sel} .fl-tool-hint`)?.textContent ?? null;
+
+  it("renders the truthful F-key sublabel on each requested button", () => {
+    const dom = build();
+    expect(hintOf(dom, ".fl-style-pocket")).toBe("F4");
+    expect(hintOf(dom, ".fl-style-hat")).toBe("F5");
+    expect(hintOf(dom, ".fl-style-block")).toBe("F6");
+    expect(hintOf(dom, ".fl-style-tag")).toBe("F7");
+    expect(hintOf(dom, ".fl-style-cite")).toBe("F8");
+    expect(hintOf(dom, ".fl-tool-underline")).toBe("F9");
+    expect(hintOf(dom, ".fl-tool-emphasis")).toBe("F10");
+    expect(hintOf(dom, ".fl-tool-clear")).toBe("F12");
+    // Highlight (F11) labels the colour-swatch group (swatches are colour-only): the hint is a sibling of the swatches.
+    const swatchGroup = dom.querySelector(".fl-swatch")!.parentElement as HTMLElement;
+    expect(swatchGroup.querySelector(".fl-tool-hint")?.textContent).toBe("F11");
+  });
+
+  it("keeps the label text alongside the hint (label not clobbered by the hint span)", () => {
+    const dom = build();
+    const pocket = dom.querySelector(".fl-style-pocket") as HTMLButtonElement;
+    expect(pocket.textContent).toContain("Pocket");
+    expect(pocket.querySelector(".fl-tool-hint")?.textContent).toBe("F4");
+  });
+
+  it("does not add hints to the non-F-key buttons (Bold=Mod-B, Muted=Mod-8)", () => {
+    const dom = build();
+    expect(dom.querySelector(".fl-tool-strong .fl-tool-hint")).toBeNull();
+    expect(dom.querySelector(".fl-tool-muted .fl-tool-hint")).toBeNull();
+  });
+
+  // Structural proof of the F10-underline fix: each label is its own `.fl-tool-label` span and the F-key hint is a
+  // SIBLING of it, never a descendant. The Underline/Emphasis label decoration (CSS) therefore cannot bleed onto the
+  // hint — "F10" stays plain inside the bold+underlined+boxed Emphasis button. (Actual paint is the human gate.)
+  it("wraps each label in a .fl-tool-label span with the hint OUTSIDE it (so label decoration can't reach the hint)", () => {
+    const dom = build();
+    const emphasis = dom.querySelector(".fl-tool-emphasis") as HTMLButtonElement;
+    expect(emphasis.querySelector(".fl-tool-label")?.textContent).toBe("Emphasis");
+    expect(emphasis.querySelector(".fl-tool-label")?.querySelector(".fl-tool-hint")).toBeNull();
+    expect(emphasis.querySelector(".fl-tool-hint")?.textContent).toBe("F10");
+    const underline = dom.querySelector(".fl-tool-underline") as HTMLButtonElement;
+    expect(underline.querySelector(".fl-tool-label")?.textContent).toBe("Underline");
+    expect(underline.querySelector(".fl-tool-label")?.querySelector(".fl-tool-hint")).toBeNull();
   });
 });

@@ -34,11 +34,11 @@ const anal = (text: string, id: string): PMNode => analytic.create({ blockId: id
 const head = (text: string, id: string): PMNode => heading.create({ blockId: id, level: "block" }, schema.text(text));
 
 // A valid card (body := paragraph+): one body paragraph with a distinct id, via the production buildCard.
+// Card content is now `tag body` (the cite node was removed in v5), so no cite content is supplied.
 function aCard(id: string, bodyId: string, bodyText = "evidence"): PMNode {
   return buildCard({
     blockId: id,
     tag: [schema.text("claim")],
-    cite: [schema.text("Author 24")],
     body: [{ blockId: bodyId, content: [schema.text(bodyText)] }],
   });
 }
@@ -52,7 +52,8 @@ const topIds = (d: PMNode): string[] => {
   d.forEach((n) => out.push(n.attrs.blockId as string));
   return out;
 };
-const bodyOf = (d: PMNode, i = 0): PMNode => d.child(i).child(2);
+// Card children are now `tag body` (cite NODE removed in v5), so the body is the SECOND child (index 1).
+const bodyOf = (d: PMNode, i = 0): PMNode => d.child(i).child(1);
 const bodyIds = (d: PMNode, i = 0): string[] => {
   const out: string[] = [];
   bodyOf(d, i).forEach((p) => out.push(p.attrs.blockId as string));

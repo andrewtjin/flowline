@@ -120,7 +120,7 @@ describe("paste guard drops all block structure", () => {
     out.content.forEach((n) => expect(n.isInline).toBe(true)); // inline only → tag stays intact
     expect(result.childCount).toBe(1); // the card was NOT split into multiple top-level blocks
     expect(result.firstChild?.type).toBe(schema.nodes.card);
-    expect(result.firstChild?.childCount).toBe(3); // tag/cite/body all still present
+    expect(result.firstChild?.childCount).toBe(2); // tag + body both still present (cite NODE removed in v5)
     expect(() => result.check()).not.toThrow();
   });
 

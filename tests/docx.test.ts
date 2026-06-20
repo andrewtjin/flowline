@@ -72,12 +72,13 @@ describe("docx export packing", () => {
     styleBlock("Normal"); // the Heading*/Analytics basedOn/next="Normal" chains resolve — Normal is defined exactly once (no dangling ref)
   });
 
-  it("applies <w:pStyle> on the five styled blocks and NONE on cite/body/plain (document.xml)", async () => {
+  it("applies <w:pStyle> on the five styled blocks and NONE on body/plain (document.xml)", async () => {
+    // Card is now `tag body` (no cite NODE/paragraph in v5); the source text rides inline on a body run.
     const doc = schema.nodes.doc.create(null, [
       schema.nodes.heading.create({ blockId: id(), level: "pocket" }, schema.text("P")),
       schema.nodes.heading.create({ blockId: id(), level: "hat" }, schema.text("H")),
       schema.nodes.heading.create({ blockId: id(), level: "block" }, schema.text("B")),
-      buildCard({ blockId: id(), tag: [schema.text("TAG")], cite: [schema.text("CITE")], body: [{ blockId: id(), content: [schema.text("BODY")] }] }),
+      buildCard({ blockId: id(), tag: [schema.text("TAG")], body: [{ blockId: id(), content: [schema.text("BODY")] }] }),
       schema.nodes.analytic.create({ blockId: id() }, schema.text("AN")),
       schema.nodes.paragraph.create({ blockId: id() }, schema.text("plain")),
     ]);
@@ -88,12 +89,12 @@ describe("docx export packing", () => {
     expect(xml).toMatch(/<w:pStyle\s+w:val="Heading3"\s*\/>/); // block
     expect(xml).toMatch(/<w:pStyle\s+w:val="Heading4"\s*\/>/); // card tag
     expect(xml).toMatch(/<w:pStyle\s+w:val="Analytics"\s*\/>/); // analytic
-    // Exactly five pStyle references in the body — cite, body para, and plain paragraph add none.
+    // Exactly five pStyle references in the body — the body para and plain paragraph add none.
     expect((xml.match(/<w:pStyle\b/g) ?? []).length).toBe(5);
-    // Byte-layer IDENTITY (not just count): the cite, body, and plain paragraphs SPECIFICALLY carry no style —
-    // a regression that styled cite while un-styling another block could keep the count at 5 but shift identity.
+    // Byte-layer IDENTITY (not just count): the body and plain paragraphs SPECIFICALLY carry no style —
+    // a regression that styled one while un-styling another block could keep the count at 5 but shift identity.
     const paraWith = (text: string): string => (xml.match(/<w:p[ >][\s\S]*?<\/w:p>/g) ?? []).find((p) => p.includes(text)) ?? "";
-    for (const unstyled of ["CITE", "BODY", "plain"]) {
+    for (const unstyled of ["BODY", "plain"]) {
       const p = paraWith(unstyled);
       expect(p).not.toBe(""); // the paragraph exists
       expect(p).not.toContain("<w:pStyle"); // ...and it has no style → never a nav-pane entry
