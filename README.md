@@ -12,9 +12,10 @@ envelope (`FLOW\x01`).
 ## Develop
 ```bash
 npm install
-npm run dev          # Vite dev server — editor preview at http://localhost:5173
-npm test             # Vitest unit/integration tests
-npm run check        # full gate: typecheck + lint + schema-hash + tests
+npm run dev           # Vite dev server — editor preview at http://localhost:5173
+npm run dev:electron  # Electron standalone client
+npm test              # Vitest unit/integration tests
+npm run check         # full gate: typecheck + lint + schema-hash + tests
 ```
 
 ## Document model
