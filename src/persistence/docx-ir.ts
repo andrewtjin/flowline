@@ -67,7 +67,7 @@ export const HEADING_HALF_POINTS: Record<string, number> = {
   hat: 44, // 22pt → Heading2
   block: 32, // 16pt → Heading3
 };
-/** Dark blue for analytic prose (matches the editor's dark-blue analytic). Clean-room hex, not a reference value. */
+/** Dark blue for analytic prose (matches the editor's dark-blue analytic). Clean-implementation hex, not a reference value. */
 export const ANALYTIC_COLOR = "1F3A93";
 
 /** Word paragraph-STYLE id per Flowline heading level. unknown/legacy level → Heading3 (mirrors the size fallback).

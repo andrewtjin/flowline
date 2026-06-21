@@ -6,9 +6,9 @@
 //   Outline pane: renders Word-nav-pane collapse carets — a caret only on an entry that has deeper
 //       children, and collapsing a heading hides its whole subtree (siblings stay) until it is expanded again.
 //
-// Both panes are exercised through the real createSidebar control surface (DOM-level assertions). The Outline
-// tests stub getView to expose a fixed doc as state — the Outline pane only reads state.doc (buildOutline) and
-// never mutates on a caret toggle.
+// Both panes are exercised through the real createSidebar control surface (DOM-level assertions), mirroring the
+// existing pattern of driving the sidebar through its public control surface. The Outline tests stub getView to expose a fixed doc as state —
+// the Outline pane only reads state.doc (buildOutline) and never mutates on a caret toggle.
 
 import { describe, it, expect, vi } from "vitest";
 import type { EditorView } from "prosemirror-view";

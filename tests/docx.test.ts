@@ -91,8 +91,8 @@ describe("docx export packing", () => {
     expect(xml).toMatch(/<w:pStyle\s+w:val="Analytics"\s*\/>/); // analytic
     // Exactly five pStyle references in the body — the body para and plain paragraph add none.
     expect((xml.match(/<w:pStyle\b/g) ?? []).length).toBe(5);
-    // Byte-layer IDENTITY (not just count): the body and plain paragraphs SPECIFICALLY carry no style —
-    // a regression that styled one while un-styling another block could keep the count at 5 but shift identity.
+    // Byte-layer EQUALITY (not just count): the body and plain paragraphs SPECIFICALLY carry no style —
+    // a regression that styled one while un-styling another block could keep the count at 5 but shift which block is styled.
     const paraWith = (text: string): string => (xml.match(/<w:p[ >][\s\S]*?<\/w:p>/g) ?? []).find((p) => p.includes(text)) ?? "";
     for (const unstyled of ["BODY", "plain"]) {
       const p = paraWith(unstyled);

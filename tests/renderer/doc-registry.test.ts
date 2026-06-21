@@ -121,7 +121,7 @@ describe("doc-registry — the MDI state machine (S4)", () => {
   });
 });
 
-describe("F2 / S-003 — the registry NEVER enters doc.toJSON() (byte-identity guarantee)", () => {
+describe("F2 / S-003 — the registry NEVER enters doc.toJSON() (byte-for-byte equality guarantee)", () => {
   it("a doc's toJSON() — and the encoded .fl bytes — are IDENTICAL with 0 vs N other docs open", async () => {
     // Build the target doc once and capture its JSON when it is the ONLY doc in the registry.
     const reg0 = createDocRegistry(counterMinter());

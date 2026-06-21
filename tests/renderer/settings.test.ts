@@ -1,10 +1,10 @@
 // renderer/settings.test.ts — the Settings DOM shell: the SHARED single-instance overlay latch (Settings and a
-// Join-style modal can never stack, BOTH orderings), the S-003 doc-purity invariant (theme + Settings state
+// secondary modal can never stack, BOTH orderings), the S-003 doc-purity invariant (theme + Settings state
 // never enters doc.toJSON()), and the Appearance theme picker (Light ⇒ applyTheme(null), Dark ⇒ applyTheme('dark')).
 //
-// Runs under jsdom (vitest env). main.ts's modal scaffold routes through the SAME `openOverlay` primitive this
-// module exports, so calling openOverlay directly here is a faithful stand-in for "another overlay is open" — it
-// exercises the exact same module-level latch openSettings shares.
+// Runs under jsdom (vitest env). A secondary modal in main.ts routes through the SAME `openOverlay` primitive
+// this module exports, so calling openOverlay directly here is a faithful stand-in for "the secondary modal is open"
+// — it exercises the exact same module-level latch openSettings shares.
 
 import { describe, it, expect, beforeEach } from "vitest";
 import {
@@ -140,7 +140,7 @@ describe("Appearance theme picker (E7-S6)", () => {
 
 describe("unified one-page Settings layout (WT3-3 — 'don't make two panes')", () => {
   it("stacks every registered section on one page with NO rail; both sections render together", () => {
-    // Register a second section (any host-added section) to prove stacking on one page.
+    // Register a second section (mirrors a secondary 'Display name' section main.ts adds) to prove stacking.
     let rendered = false;
     settingsRegistries().sections.registerSection({
       id: "test-extra",

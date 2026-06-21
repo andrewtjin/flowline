@@ -6,7 +6,7 @@
 // here (declaring the handle/stream types again would create conflicting duplicate definitions). Everything is
 // OPTIONAL on Window: the web file code feature-detects (`typeof window.showSaveFilePicker === "function"`) and
 // falls back to a Blob download / <input type=file> when absent (Firefox/Safari/older), so the types never assert
-// presence. This keeps us off a `@types/wicg-file-system-access` dependency for the tiny surface we touch.
+// the methods exist. This keeps us off a `@types/wicg-file-system-access` dependency for the tiny surface we touch.
 
 interface FilePickerAcceptType {
   readonly description?: string;

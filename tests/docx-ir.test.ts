@@ -53,7 +53,7 @@ describe("docx-ir marks → run props", () => {
     expect(r.box).toBe(true);
   });
 
-  it("highlight colour names map (blue→cyan, others identity)", () => {
+  it("highlight colour names map (blue→cyan, others unchanged)", () => {
     const colour = (c: string): string | undefined => paraIR([schema.text("h", [m.highlight.create({ color: c })])]).paragraphs[0].runs[0].highlight;
     expect(colour("blue")).toBe("cyan");
     expect(colour("yellow")).toBe("yellow");

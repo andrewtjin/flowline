@@ -3,7 +3,6 @@ import { defineConfig } from "vite";
 
 // Renderer-ROOT vite config (root = src/renderer). It is auto-loaded ONLY by the standalone dev preview
 // (`npm run dev` → `vite src/renderer`, which treats src/renderer as the project root and reads this file).
-// It serves the renderer with no extra dev-server wiring.
 //
 // ── SAFETY: this file is INVISIBLE to the Electron build ──────────────────────────────────────────────
 // electron-vite (electron.vite.config.ts) resolves its targets by loading ONLY `electron.vite.config.*` and

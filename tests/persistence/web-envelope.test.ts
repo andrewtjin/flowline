@@ -34,7 +34,7 @@ function frame(header: object, payload: Uint8Array): Uint8Array {
 }
 const gzipDoc = (doc: PMNode): Uint8Array => gzipSync(new TextEncoder().encode(JSON.stringify(doc.toJSON())));
 
-describe("web-envelope round-trip identity (S2/S3)", () => {
+describe("web-envelope round-trip equality (S2/S3)", () => {
   it("round-trips the seed doc deep-equal through the WEB codec", async () => {
     const doc = createSeedDoc();
     const bytes = await encodeEnvelopeWeb(doc.toJSON());
@@ -136,7 +136,7 @@ describe("web-envelope typed open errors (same contract as node)", () => {
     await expectKind(frame({ ...okHeader, schemaVersion: SCHEMA_VERSION + 1 }, goodPayload()), "UnsupportedSchema");
   });
   it("UnsupportedPayloadKind for a non-pm-json payload kind", async () => {
-    await expectKind(frame({ ...okHeader, payloadKind: "future-binary" }, goodPayload()), "UnsupportedPayloadKind");
+    await expectKind(frame({ ...okHeader, payloadKind: "future-v2" }, goodPayload()), "UnsupportedPayloadKind");
   });
   it("BadHeader for an unknown compression", async () => {
     await expectKind(frame({ ...okHeader, compression: "brotli" }, goodPayload()), "BadHeader");

@@ -8,12 +8,13 @@
 //        #2 inclusive vs non-inclusive . highlight (inclusive) vs muted (non-inclusive)
 //        #3 mutually-excluding pair .... emphasis <-> muted (symmetric excludes)
 //        #4 destroy+recreate move ...... moveBlock (command) over this flat block list
-//        #5 full-doc-scan normalizer ... the structural absorb normalizer (paragraph→card structural absorb)
-//                                        lives in normalizer.ts as a standalone import-repair utility. It is
-//                                        NOT installed as a live editor plugin (auto-absorb was unwanted).
+//        #5 full-doc-scan normalizer ... absorbNormalizer (paragraph→card structural absorb). It is NOT a
+//                                        live editor plugin (auto-absorb was unwanted); it survives as the
+//                                        editor's exported structural absorb-normalizer, available for
+//                                        explicit one-shot use and exercised by tests.
 //
 // Mark order is LOCKED: highlight (outer) -> emphasis | muted -> underline -> strong (inner). The order
-// below IS the render order — keep highlight first so the identity-diff serialization is stable regardless
+// below IS the render order — keep highlight first so the byte-for-byte serialization is stable regardless
 // of the order marks were applied in. `underline` (schema v2) and `strong` (schema v3) sit innermost so the
 // highlight background still wraps a read+underlined+bold span.
 
@@ -30,8 +31,7 @@ export const DEFAULT_HIGHLIGHT_COLOR: HighlightColor = "blue";
 // Debate heading hierarchy expressed as a flat `level` attr (NOT nesting).
 export const HEADING_LEVELS = ["pocket", "hat", "block"] as const;
 export type HeadingLevel = (typeof HEADING_LEVELS)[number];
-// Internal: consumed only within this file (heading spec default + parseDOM fallback). Not part of the
-// module's public surface — every consumer reads heading level off a built node, not this constant.
+// Used only in-file (heading spec default + parseDOM fallback); not part of the public schema API.
 const DEFAULT_HEADING_LEVEL: HeadingLevel = "block";
 
 // ── Helpers ──────────────────────────────────────────────────────────────────────────────────
@@ -65,10 +65,9 @@ function requiredBlockId(value: unknown): void {
 }
 
 // ── Nodes ────────────────────────────────────────────────────────────────────────────────────
-// Internal: fed to `new Schema(...)` below. Consumers read `schema.nodes` off the built instance, never
-// this raw spec map — so it stays module-private.
+// Internal: feeds `new Schema(...)` below; consumers read node specs via `schema.nodes`, never this map.
 const nodes: Record<string, NodeSpec> = {
-  // The document root: a flat ordered list of blocks.
+  // The only synced root: a flat ordered list of blocks (binds to one Y.XmlFragment later).
   // NOTE: content is `block*`, not `block+`. Every block requires a `blockId` with no
   // default, which makes all block types "non-generatable"; ProseMirror cannot auto-fill a REQUIRED
   // block position, so `block+` throws at schema construction ("non-generatable in a required
@@ -185,12 +184,12 @@ const nodes: Record<string, NodeSpec> = {
 //
 // NOTE on `excludes` (the mutually-excluding pair): emphasis and muted symmetrically `excludes` each other,
 // so editing can never put both on one char (ProseMirror's addToSet evicts the excluded mark).
-// In ProseMirror, `Node.fromJSON` TOLERATES a both-marks state (one that could arise transiently from an
-// external source) while `node.check()` REJECTS it ("Invalid collection of marks"). That is intended: such a
-// transient must be reconciled by a normalizer BEFORE the doc is run through the conformance gate. (Behavior
-// pinned in tests/schema.test.ts.)
-// Internal: fed to `new Schema(...)` below. Consumers read `schema.marks` off the built instance, never
-// this raw spec map — so it stays module-private.
+// BUT `excludes` is only enforced at edit time, not on load: a malformed or externally-produced doc CAN
+// carry a char with both marks. In ProseMirror, `Node.fromJSON` TOLERATES such a both-marks state while
+// `node.check()` REJECTS it ("Invalid collection of marks"). That is intended: a normalizing pass must
+// reconcile such a transient before the doc is validated — normalize a loaded doc BEFORE running the
+// conformance gate on it. (Behavior pinned in tests/schema.test.ts.)
+// Internal: feeds `new Schema(...)` below; consumers read mark specs via `schema.marks`, never this map.
 const marks: Record<string, MarkSpec> = {
   // Read-aloud highlighter (highest-frequency action). `color` is REQUIRED (no schema default) so a
   // highlight missing its color is rejected by the conformance gate; the command/parseDOM default to
@@ -257,7 +256,7 @@ const marks: Record<string, MarkSpec> = {
   // migrate that node into a cite-marked leading body paragraph (persistence/migrations.ts). Innermost in the
   // render order (rank 5) so a highlight/emphasis still wraps a cite-marked run. NAME NOTE: the mark key is
   // the plain word `cite` (generic debate vocabulary, explicitly allowed) — never the underscored variant the
-  // clean-room vocabulary gate bans.
+  // clean-implementation vocabulary gate bans.
   cite: {
     inclusive: true,
     parseDOM: [{ tag: "span.fl-cite" }],
@@ -286,9 +285,9 @@ export interface CardBodyParagraph {
 // `body` MUST have >=1 entry to satisfy `paragraph+`; passing `body: []` builds a card that
 // node.check() REJECTS (the structural teeth of the multi-paragraph body).
 //
-// `cite?` is RETAINED only as a documented NO-OP for source-compatibility: schema v5 removed the `cite` card
-// child (cite is now an inline mark), but older fixtures/tests still build cards via `buildCard({cite})`, so the
-// param is accepted and IGNORED rather than removed (which would break those call sites). First-party callers
+// `cite?` is RETAINED only for source-compatibility with older callers (some tests build fixtures via
+// `buildCard({cite})`, and those files sit outside this track's edit boundary). It is now
+// a documented NO-OP: schema v5 removed the `cite` card child (cite is an inline mark). First-party callers
 // (seed, convertToTag) never pass it; real documents preserve their old cite text via the v4→v5 migration
 // (persistence/migrations.ts), NOT this param.
 export interface BuildCardArgs {

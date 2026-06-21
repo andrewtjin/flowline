@@ -7,11 +7,11 @@
 // its dirty flag. New adds an entry and makes it active; selecting an entry makes it active; closing removes one.
 //
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════
-// CRITICAL INVARIANT (F2 / S-003 — the byte-identity guarantee). This registry is PERIPHERAL session state. It is
+// CRITICAL INVARIANT (F2 / S-003 — the byte-for-byte equality guarantee). This registry is PERIPHERAL session state. It is
 // NEVER serialized, and it NEVER enters `doc.toJSON()`. The persisted `.fl` content for a given document is a pure
 // function of THAT document's own EditorState — it does not depend on how many other docs are in the registry, in
 // what order, or which is active. The registry only PARKS each doc's own state; it never folds cross-doc data into
-// a doc. The byte-identity test (tests/renderer/doc-registry.test.ts) proves `activeDoc().toJSON()` is identical
+// a doc. The byte-for-byte equality test (tests/renderer/doc-registry.test.ts) proves `activeDoc().toJSON()` is identical
 // with 0 vs N other docs open. Do not add anything here that a doc's toJSON could observe.
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════
 

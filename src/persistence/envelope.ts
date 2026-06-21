@@ -5,8 +5,9 @@
 //   [ headerLen: uint32 LE = BYTE length of the UTF-8 header JSON (NOT its string length) ]
 //   [ header   : UTF-8 JSON { formatVersion, schemaVersion, payloadKind, compression, appVersion } ]
 //   [ payload  : compression(UTF-8 JSON.stringify(doc.toJSON())) ]
-// The current payloadKind is "pm-json" (a lossless dead snapshot); the same envelope can later carry
-// a future binary payloadKind — the version fields are locked now so that addition is non-breaking.
+// The current payloadKind is "pm-json" (a lossless dead snapshot); the same envelope could later carry
+// a future payload kind — the version fields are locked now so that add is
+// non-breaking.
 //
 // WHY Buffer-AGNOSTIC (a critical robustness requirement). The decoder runs in the Electron MAIN process on a Node
 // `Buffer` read from disk, but a Buffer that ever crossed an IPC structured-clone boundary arrives as a
@@ -30,8 +31,14 @@ import { gzipSync, gunzipSync } from "node:zlib";
 import { randomUUID } from "node:crypto";
 import { SCHEMA_VERSION, APP_VERSION } from "../version";
 import { EnvelopeError } from "./errors";
-import { migrateDocJson } from "./migrations";
-import { buildHeader, frameEnvelope, parseFrame } from "./envelope-frame";
+import {
+  buildHeader,
+  frameEnvelope,
+  parseFrame,
+  encodePayloadBytes,
+  decodePayloadJson,
+  MAX_DOC_BYTES,
+} from "./envelope-frame";
 import type { EnvelopeHeader } from "./envelope-frame";
 
 // Re-export the typed error (+ kind) so main-process call sites keep importing from this module. The class
@@ -42,9 +49,10 @@ export type { EnvelopeErrorKind } from "./errors";
 export type { EnvelopeHeader } from "./envelope-frame";
 
 // Decompression cap: the codec runs in the privileged MAIN process on UNTRUSTED file bytes and decompresses
-// BEFORE it can validate the payload, so a gzip-bomb .fl could otherwise OOM/freeze the app. 64 MB is far beyond
-// any real debate document; exceeding it makes gunzip throw → a typed BadPayload (caught below). Exported for tests.
-export const MAX_DOC_BYTES = 64 * 1024 * 1024;
+// BEFORE it can validate the payload, so a gzip-bomb .fl could otherwise OOM/freeze the app. The single value now
+// lives in envelope-frame.ts (shared with the web codec so the two cannot drift); re-exported here so the existing
+// `import { ..., MAX_DOC_BYTES } from "./envelope"` call sites (incl. the envelope test) keep resolving.
+export { MAX_DOC_BYTES };
 
 /**
  * Encode a Flowline document JSON (`doc.toJSON()`) into the native envelope bytes. `docJson` is the plain
@@ -57,8 +65,8 @@ export const MAX_DOC_BYTES = 64 * 1024 * 1024;
  */
 export function encodeEnvelope(docJson: unknown): Uint8Array {
   const header: EnvelopeHeader = buildHeader(SCHEMA_VERSION, APP_VERSION);
-  const payloadJson = new TextEncoder().encode(JSON.stringify(docJson));
-  const payload = gzipSync(payloadJson); // Buffer (a Uint8Array) — passed to frameEnvelope via the Uint8Array surface
+  // Shared pre-compression head (docJson → UTF-8 bytes); only the gzip primitive is node-specific here.
+  const payload = gzipSync(encodePayloadBytes(docJson)); // Buffer (a Uint8Array) — framed via the Uint8Array surface
   return frameEnvelope(header, payload);
 }
 
@@ -73,25 +81,15 @@ export function encodeEnvelope(docJson: unknown): Uint8Array {
  */
 export function decodeEnvelope(bytes: Uint8Array): { header: EnvelopeHeader; docJson: unknown } {
   const { header, rawPayload } = parseFrame(bytes, SCHEMA_VERSION);
-  // Payload → JSON (node sync zlib). A gunzip overrun (size cap), corrupt stream, bad UTF-8, or invalid JSON all
-  // collapse to a single typed BadPayload — mirroring the web codec's decompress tail.
-  let payloadJson: string;
+  // Decompress with node SYNC zlib (keeps this whole decode synchronous). A gunzip overrun (size cap) or corrupt
+  // stream throws → map it to the same typed BadPayload the shared tail uses (the caller-owned half of the
+  // decodePayloadJson error contract). The bytes → validated, up-migrated JSON tail is the shared helper.
+  let decompressed: Uint8Array;
   try {
-    const bytesOut = header.compression === "gzip" ? gunzipSync(rawPayload, { maxOutputLength: MAX_DOC_BYTES }) : rawPayload;
-    payloadJson = new TextDecoder("utf-8", { fatal: true }).decode(bytesOut);
+    decompressed = header.compression === "gzip" ? gunzipSync(rawPayload, { maxOutputLength: MAX_DOC_BYTES }) : rawPayload;
   } catch {
     throw new EnvelopeError("BadPayload", "File is corrupt (unreadable content).");
   }
-  let docJson: unknown;
-  try {
-    docJson = JSON.parse(payloadJson);
-  } catch {
-    throw new EnvelopeError("BadPayload", "File is corrupt (unreadable content).");
-  }
-  // Up-migrate an older-schema payload to the CURRENT schema before handing it back (e.g. v4→v5 folds each
-  // card's removed `cite` node into a cite-marked leading body line). document.ts then nodeFromJSON + check()s it.
-  if (header.schemaVersion < SCHEMA_VERSION) {
-    docJson = migrateDocJson(docJson, header.schemaVersion, { newId: () => randomUUID() });
-  }
+  const docJson = decodePayloadJson(decompressed, header.schemaVersion, SCHEMA_VERSION, () => randomUUID());
   return { header, docJson };
 }

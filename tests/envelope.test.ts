@@ -1,4 +1,4 @@
-// envelope.test.ts — native save→reopen identity + typed open errors.
+// envelope.test.ts — native save→reopen equality + typed open errors.
 //
 // Asserts the DECODE CONTRACT (deep-equal via doc.eq + header fields), never golden bytes (gzip stamps a
 // platform OS byte → cross-OS byte-instability). Drives the full version-skew / corruption / Buffer-agnostic
@@ -42,7 +42,7 @@ function frameRaw(headerText: string, payload: Uint8Array): Uint8Array {
 const okHeader = { formatVersion: 1, schemaVersion: SCHEMA_VERSION, payloadKind: "pm-json", compression: "gzip", appVersion: "0.0.0" };
 const gzipDoc = (doc: PMNode): Uint8Array => gzipSync(new TextEncoder().encode(JSON.stringify(doc.toJSON())));
 
-/** Round-trip a doc and assert PM-level identity + correct header fields. */
+/** Round-trip a doc and assert PM-level equality + correct header fields. */
 function roundTrip(doc: PMNode): void {
   const bytes = encodeEnvelope(doc.toJSON());
   const { header, docJson } = decodeEnvelope(bytes);
@@ -53,7 +53,7 @@ function roundTrip(doc: PMNode): void {
   expect(docFromJson(docJson).eq(doc)).toBe(true); // deep-equal via doc.eq, NOT JSON-string equality
 }
 
-describe("envelope round-trip identity", () => {
+describe("envelope round-trip equality", () => {
   it("round-trips the seed doc deep-equal", () => {
     roundTrip(createSeedDoc());
   });
@@ -229,7 +229,7 @@ describe("envelope typed open errors", () => {
     expect(body.child(1).textContent).toBe("evidence");
   });
   it("UnsupportedPayloadKind for a non-pm-json payload kind", () => {
-    expectKind(frame({ ...okHeader, payloadKind: "future-binary" }, goodPayload()), "UnsupportedPayloadKind");
+    expectKind(frame({ ...okHeader, payloadKind: "future-v2" }, goodPayload()), "UnsupportedPayloadKind");
   });
   it("BadHeader for an unknown compression", () => {
     expectKind(frame({ ...okHeader, compression: "brotli" }, goodPayload()), "BadHeader");

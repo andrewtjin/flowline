@@ -835,7 +835,7 @@ describe("dissolveCard via setHeadingLevel", () => {
     expect(state.doc.child(0).type.name).toBe("heading");
     expect(state.doc.child(0).attrs.level).toBe("pocket");
     // On the node-selected path the ejected body paragraph is RELOCATED, keeping its original blockId
-    // (`c1b`) rather than getting a freshly minted one — the body paragraph carries identity through dissolve.
+    // (`c1b`) rather than getting a freshly minted one — the body paragraph carries its blockId through dissolve.
     const lastPara = state.doc.child(state.doc.childCount - 1);
     expect(lastPara.type.name).toBe("paragraph");
     expect(lastPara.textContent).toBe("Body");

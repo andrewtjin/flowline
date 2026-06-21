@@ -11,7 +11,7 @@ export type EnvelopeErrorKind =
   | "BadHeader" // truncated / out-of-bounds / unparseable header or unknown compression
   | "UnsupportedFormat" // envelope formatVersion newer than this build understands
   | "UnsupportedSchema" // doc schemaVersion newer (or older — no migration path yet) than this build's
-  | "UnsupportedPayloadKind" // a payload kind this build cannot read (e.g. a future binary payload format)
+  | "UnsupportedPayloadKind" // a payload kind this build cannot read (e.g. a future payload kind)
   | "BadPayload" // decompression / payload-JSON failure
   | "BadDocument"; // well-formed JSON that is not a valid Flowline doc (wrong root / fails check())
 

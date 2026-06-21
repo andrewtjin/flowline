@@ -13,16 +13,15 @@
 
 import { SCHEMA_VERSION, APP_VERSION } from "../version";
 import { EnvelopeError } from "./errors";
-import { encodeEnvelopeWith, decodeEnvelopeWith } from "./envelope-frame";
+import { encodeEnvelopeWith, decodeEnvelopeWith, MAX_DOC_BYTES } from "./envelope-frame";
 import type { EnvelopeHeader } from "./envelope-frame";
 
 export { EnvelopeError };
 export type { EnvelopeHeader } from "./envelope-frame";
 
-// Same 64 MB decompression cap as the node codec (envelope.ts): we inflate UNTRUSTED file bytes before we can
-// validate them, so a gzip-bomb `.fl` could OOM the tab. We bound the inflated size while reading the stream and
-// throw past the cap → a typed BadPayload (the frame's decompress wrapper maps any throw to BadPayload).
-const MAX_DOC_BYTES = 64 * 1024 * 1024;
+// 64 MB decompression cap, shared from envelope-frame.ts with the node codec so the two cannot drift: we inflate
+// UNTRUSTED file bytes before we can validate them, so a gzip-bomb `.fl` could OOM the tab. We bound the inflated
+// size while reading the stream and throw past the cap → a typed BadPayload (the decompress wrapper maps it).
 
 /** Concatenate a list of chunks into one Uint8Array (the streams API yields chunks; we need a flat buffer). */
 function concat(chunks: Uint8Array[], total: number): Uint8Array {

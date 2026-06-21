@@ -154,7 +154,7 @@ export async function webSaveFl(
 
   // Save-in-place: a known handle + a plain Save → overwrite, no prompt.
   //
-  // DURABILITY — why no manual temp-file+rename here (the classic atomic temp+rename trick on a node fs path).
+  // DURABILITY — why no manual temp-file+rename here (cf. a node fs path that does atomic temp+rename).
   // `createWritable()` (default `keepExistingData:false`) does NOT truncate the
   // target file: Chromium's File System Access API writes to a browser-managed SWAP file and only ATOMICALLY moves
   // it onto the target when `close()` RESOLVES (per the FSA spec, the write operations are buffered and committed

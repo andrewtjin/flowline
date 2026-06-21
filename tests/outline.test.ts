@@ -127,7 +127,7 @@ describe("resolveBlockPos", () => {
     expect(resolveBlockPos(d, "nope")).toBeNull();
   });
 
-  it("returns the FIRST match when a duplicate id appears (duplicate-id tolerance)", () => {
+  it("returns the FIRST match when a duplicate id appears (CRDT dup tolerance)", () => {
     const d = doc.create(null, [
       head("first", "hat", "dup"),
       anal("middle", "uniq"),

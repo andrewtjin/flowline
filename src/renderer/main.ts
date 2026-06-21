@@ -1,4 +1,4 @@
-// renderer/main.ts — the renderer entry (browser dev preview, the Electron renderer, AND the web build).
+// renderer/main.ts — the renderer entry (browser dev preview AND the Electron renderer).
 //
 // Mounts the one Flowline EditorView with the mark toolbar, the keymaps, and the File machinery. The
 // dispatch passed to `createFlowlineView` is the documented extension point (editor.ts): it calls the
@@ -7,37 +7,33 @@
 //
 // This is the single-user editor: prosemirror-history undo, File/Edit/View/Window menus, the tabbed sidebar +
 // live outline, the initial-doc PULL, .fl persistence, .docx export, Settings + dark mode. `buildEditorRuntime`
-// (runtime.ts) resolves the doc + plugins; this file mounts whatever it returns.
+// (runtime.ts) resolves the doc + plugins; this file mounts whatever it returns. The File/persistence + windowing
+// machinery is gated on the `window.flowline` preload bridge (absent in the bare browser preview ⇒ inert there).
 //
-// Two host shapes, gated on the `window.flowline` preload bridge:
-//   - DESKTOP (Electron, bridge present): File/persistence + multi-window machinery routes through MAIN — a
-//     tabbed sidebar (Documents | Outline), a per-window doc-state report, the menu commands, a guarded close,
-//     a synchronous quit-guard, and an initial-doc PULL from MAIN to decide this window's start doc.
-//   - WEB (no bridge, E10b): the renderer owns the File machinery itself — an in-window MDI registry, web file
-//     dialogs (File System Access API + Blob-download fallback), an in-renderer menu bar + Ctrl+S/Ctrl+M
-//     accelerators, and a web close-guard. The bare browser preview (also no bridge) shares the web path.
+// Multi-window: the desktop shell adds a tabbed sidebar (Documents | Outline) + a live outline derivation, a
+// per-window doc-state report to MAIN, the multi-window menu commands, a guarded per-window close, a synchronous
+// quit-guard, and an initial-doc PULL from MAIN to decide this window's start doc.
 
-import { TextSelection, Selection, EditorState } from "prosemirror-state";
+import { TextSelection, Selection } from "prosemirror-state";
 import { undo, redo } from "prosemirror-history";
 import type { EditorView } from "prosemirror-view";
 import type { Node as PMNode } from "prosemirror-model";
 import { applyTransaction, createFlowlineView, LOAD_META } from "../editor";
 import { createSeedDoc } from "../seed";
+import { moveBlock } from "../commands";
 import { createToolbar } from "../toolbar";
 import { createSidebar } from "./sidebar";
-import { createMenuBar } from "./menubar";
-import { createDocRegistry } from "./doc-registry";
-import { webSaveFl, webOpenFl } from "./web-files";
-import { webExportDocx } from "../persistence/web-docx";
+import type { DocEntry } from "./doc-registry";
+import { resolveHost } from "./host/resolve-host";
+import { WebHost } from "./host/web-host";
 import { needsClosePrompt, resolveClose } from "./close-guard";
-import { isSaveChord, isSaveAsChord, isNewChord } from "./web-keys";
-import type { UnsavedChoice, MenuCommand } from "../persistence/bridge";
 import { isReusable } from "./outline";
 import { schema } from "../schema";
 import { structureHost } from "../structure-host";
 import { docFromJson } from "../persistence/document";
+import type { MenuCommand } from "../persistence/bridge";
 import { SCHEMA_VERSION } from "../version";
-import { buildEditorRuntime } from "./runtime";
+import { buildEditorRuntime, topLevelBlockIds, blockText, firstBodyPos } from "./runtime";
 import { openOverlay, openSettings, registerBuiltinSettings, settingsRegistries } from "./settings";
 import { loadPersistedTheme } from "./settings-registry";
 import "../styles.css";
@@ -63,26 +59,20 @@ if (mount) {
   // no-flash boot script in index.html already set documentElement.dataset.theme synchronously to avoid a white
   // flash; loadPersistedTheme re-runs the SAME resolution through the theme registry (so a programmatic theme's
   // `vars` re-apply) and keeps the persisted key + dataset in lockstep. Theme state lives ONLY on the dataset +
-  // localStorage — it never enters doc.toJSON() (S-003).
+  // localStorage — it never enters doc.toJSON() (S-003). (createSidebar lives further down; the "+ New document"
+  // onNewDoc is wired into THAT call.)
   registerBuiltinSettings();
   loadPersistedTheme(settingsRegistries().themes);
-
   // ── File state (PERIPHERAL — lives here in session scope, NEVER in the doc) ──────────
   let currentPath: string | null = null;
   let dirty = false;
 
-  // ── WEB single-user mode (E10b) ──────────────────────────────────────────────────────────────────────
-  // The desktop app routes File/Window actions through the `window.flowline` preload bridge; the bare web build
-  // has NO bridge, so those were inert (E10's web menu only ran View). E10b makes them work on web, gated on
-  // `!window.flowline`: web file I/O + the in-window MDI registry activate ONLY when there is no bridge. Desktop
-  // (bridge present) is byte-for-byte unchanged.
-  const isWeb = !window.flowline;
-  // The in-window MDI registry (web only): the open docs, their parked EditorStates, paths, and dirty flags. It is
-  // renderer-only session state and NEVER enters any doc.toJSON() (the F2/S-003 invariant — see doc-registry.ts).
-  const registry = createDocRegistry();
-  // Per-doc File System Access handle (web only), keyed by registry id, so a plain Save overwrites the same file
-  // with no re-prompt. Kept OUT of the registry (which is typed for doc/path/dirty) — session state, never in a doc.
-  const handles = new Map<string, FileSystemFileHandle | null>();
+  // ── PLATFORM (EditorHost) ────────────────────────────────────────────────────────────────────────────
+  // The platform axis — web FSA file I/O + the in-window MDI registry/handles vs the desktop `window.flowline`
+  // bridge — is owned by the EditorHost resolved once below (resolveHost). The old `isWeb` predicate + the
+  // renderer-only MDI registry/handles that lived here moved into WebHost (host/web-host.ts); the renderer now
+  // depends on `host.*` for every platform primitive. The desktop-vs-web boot/window asymmetries are the inherent
+  // handful of `host.platform` checks that remain.
 
   const fileLabel = (): string => (currentPath ? (currentPath.split(/[\\/]/).pop() ?? "Untitled") : "Untitled");
 
@@ -96,7 +86,10 @@ if (mount) {
     const key = `${title} ${dirty ? "1" : "0"} ${currentPath ?? ""}`;
     if (key === lastReported) return; // dedupe: only report a real change
     lastReported = key;
-    window.flowline?.reportDocState({ title, dirty, path: currentPath });
+    // Route through the platform host: desktop → MAIN (drives the Documents broadcast); web → the WebHost's
+    // in-window Documents pane (surfaces the ● / title). (`host` is resolved further below; this arrow only runs at
+    // interaction/boot time, after construction — the same forward-closure idiom as `run` / the `dispatch` thunk.)
+    host.reportDocState({ title, dirty, path: currentPath });
   };
 
   // The window title shows the filename + a ● dirty marker and the schema version. Set whenever dirty/path
@@ -111,7 +104,7 @@ if (mount) {
     schema.nodes.doc.create(null, [schema.nodes.paragraph.create({ blockId: structureHost.structure.newUnitId() })]);
 
   // Replace the whole document THROUGH the single dispatch seam (never view.updateState). The load tr is
-  // tagged LOAD_META so the absorb normalizer ignores it (preserving save→reopen identity) and the dirty-flag
+  // tagged LOAD_META so the absorb normalizer ignores it (preserving save→reopen equality) and the dirty-flag
   // skips it; addToHistory:false so Ctrl+Z can't revert to the previous file; the caret goes to the doc start.
   // An empty payload (0 blocks) is seeded with one paragraph so the editor stays usable.
   const loadDoc = (doc: PMNode): void => {
@@ -124,85 +117,19 @@ if (mount) {
     view.dispatch(tr);
   };
 
-  // ── WEB helpers (only invoked when isWeb; defined here so the File handlers below can delegate) ──────────
-  // `webPrompt` is assigned in the boot IIFE once createModal exists; until then it is a no-op resolving to
-  // "cancel" (it is never CALLED before boot — dirty is false until the first edit, which needs the built view).
-  // It shows the SAME Save/Discard/Cancel choice as the desktop native dialog, so web S5/S6 mirror desktop.
-  let webPrompt: () => Promise<UnsavedChoice> = () => Promise.resolve("cancel");
+  // (The WEB in-window helpers that used to live here — webPrompt / parkActive / activateEntry / renderWebDocs /
+  // closeWebDoc — moved into WebHost (host/web-host.ts), which now OWNS the MDI registry + handles. main.ts keeps
+  // only the irreducible view residue as `loadActiveEntry` (the §R8 LOAD_META dispatch, defined in the seam zone).)
 
-  // Sync the live editor + active doc-state INTO the active registry entry, so switching away parks the latest
-  // edits/path/dirty and switching back restores them exactly. Called before any active-doc switch/close.
-  const parkActive = (): void => {
-    registry.syncActiveState(getView().state);
-    registry.setActivePath(currentPath);
-    registry.setActiveDirty(dirty);
-  };
-
-  // Make the registry's active entry the live editor: load its parked doc through the seam and adopt its
-  // path/dirty as the module-scope active state. Re-renders the Documents pane so the active marker tracks.
-  const activateEntry = (): void => {
-    const entry = registry.active();
-    if (!entry) return;
-    // Replace the whole doc through the single seam (LOAD_META so it is not counted as a user edit / dirtying).
-    const view = getView();
-    const tr = view.state.tr.replaceWith(0, view.state.doc.content.size, entry.state.doc.content);
-    tr.setMeta(LOAD_META, true);
-    tr.setMeta("addToHistory", false);
-    tr.setSelection(Selection.atStart(tr.doc));
-    view.dispatch(tr);
-    currentPath = entry.path;
-    dirty = entry.dirty;
-    updateTitle();
-    renderWebDocs();
-    view.focus();
-  };
-
-  // Re-render the web Documents pane from the live registry. Defined as a thin indirection so the registry
-  // mutations below stay terse; the actual sidebar wiring happens in the boot IIFE (setWebDocs).
-  let renderWebDocs: () => void = () => {};
-
-  // Guarded close of one in-window doc by registry id (S5: the x, and S6: Window>Close share this ONE path). To
-  // guard the RIGHT doc's unsaved work, first make it active (so `dirty`/the live view reflect it), run the shared
-  // unsaved-work guard, and only on "proceed" remove it from the registry + activate the neighbour the registry
-  // returns (or load a fresh empty doc when the last one closes — the window never goes doc-less). On "abort" the
-  // doc stays open. The guard itself is guardUnsaved (web branch), which uses the PURE close-guard decision.
-  const closeWebDoc = async (id: string): Promise<void> => {
-    // Switch to the target so the guard + live editor address THAT doc. If it is already active this is a no-op.
-    if (registry.activeId() !== id) {
-      parkActive();
-      if (registry.select(id)) activateEntry();
-    }
-    if (!(await guardUnsaved())) return; // user cancelled / a failed save → keep the doc open
-    handles.delete(id);
-    const nextId = registry.close(id);
-    if (nextId === null) {
-      // Closed the last doc — keep the window usable with a fresh empty doc (mirrors desktop never going blank).
-      registry.add(EditorState.create({ schema, doc: newDoc() }), null);
-      handles.set(registry.activeId()!, null);
-    }
-    activateEntry();
-  };
-
-  // New (renderer-decides reuse): Ctrl+N opens a blank doc in a NEW window UNLESS THIS window
-  // is an untouched empty "Untitled" (isReusable), in which case we reuse it in place (no new window — the empty
-  // window the user is already looking at becomes the new doc). When NOT reusable, ask MAIN to spawn a fresh
-  // window and leave THIS window's doc untouched. No unsaved-guard here: a reuse only happens when the doc is clean
-  // + empty (nothing to lose), and a spawn never touches the current doc.
+  // New (renderer-decides reuse): open a blank doc. DESKTOP reuses THIS window if it is an untouched empty
+  // "Untitled" (isReusable) — load a blank doc in place (main-side, through the LOAD_META seam) — else asks the host
+  // to spawn a fresh window, leaving THIS window's doc untouched. No unsaved-guard: a reuse only happens when the
+  // doc is clean + empty (nothing to lose), and a spawn never touches the current doc.
   //
-  // WEB: there are no separate windows, so New always adds a fresh in-window doc to the MDI registry (parking the
-  // current one first) and makes it active — the prior doc stays in the Documents list (S4). No guard: the prior
-  // doc is retained, not discarded.
+  // WEB has no separate windows, so it routes straight to the host's in-window MDI add (host.newDocument parks the
+  // current doc, adds a fresh one, activates it — the prior doc stays in the Documents list).
   const doNew = async (): Promise<void> => {
-    if (isWeb) {
-      parkActive();
-      // A fresh doc parked as a lightweight state snapshot (activateEntry reads only .state.doc, so the snapshot
-      // needs no plugins — the LIVE plugin-wired view is the one editing it once activated).
-      registry.add(EditorState.create({ schema, doc: newDoc() }), null);
-      handles.set(registry.activeId()!, null); // a brand-new doc has no save handle yet
-      activateEntry();
-      return;
-    }
-    if (isReusable(getView().state.doc, dirty, currentPath)) {
+    if (host.platform === "desktop" && isReusable(getView().state.doc, dirty, currentPath)) {
       loadDoc(newDoc());
       currentPath = null;
       dirty = false;
@@ -210,43 +137,28 @@ if (mount) {
       getView().focus();
       return;
     }
-    await window.flowline?.requestNewWindow();
+    await host.newDocument(); // desktop → spawn a window; web → add an in-window doc
   };
 
-  // Open (renderer-decides reuse): main shows the dialog + frame-decodes; we validate the
-  // payload as a doc. If THIS window is reusable (untouched empty Untitled) we load the file in place; otherwise we
-  // ask MAIN to spawn a new window pre-loaded with the decoded doc + path, leaving THIS window untouched. On a
-  // cancel/frame-error/bad-doc nothing changes. All native dialogs go through main.
+  // Open: the host shows the picker + decodes/validates the .fl into an OpenResult{docJson,path}. DESKTOP: if THIS
+  // window is reusable (untouched empty Untitled) load the decoded doc in place (main-side, through the LOAD_META
+  // seam; a bad doc leaves the current one intact), else spawn a new window pre-loaded with it. WEB: host.open()
+  // stashed the FSA handle, and host.newDocument({docJson,path}) adds the doc as a NEW in-window entry that adopts
+  // that handle (save-in-place), so Open never clobbers the doc the user is looking at. A cancel / frame-error /
+  // bad-doc changes nothing.
   const doOpen = async (): Promise<void> => {
-    if (isWeb) {
-      // Web: read + decode + validate via the browser file picker (or fallback). A cancel is silent; a corrupt /
-      // newer / invalid file shows its typed error and changes nothing. A valid file becomes a NEW in-window doc in
-      // the registry (parking the current one first), so Open never clobbers the doc the user is looking at (S3/S4).
-      const res = await webOpenFl();
-      if (!res.ok) {
-        if (res.message) await webShowError(res.message);
-        return;
-      }
-      parkActive();
-      registry.add(EditorState.create({ schema, doc: res.doc }), res.name);
-      handles.set(registry.activeId()!, res.handle); // remember the FSA handle for save-in-place
-      activateEntry();
-      return;
-    }
-    const bridge = window.flowline;
-    if (!bridge) return;
-    const res = await bridge.open();
+    const res = await host.open();
     if (!res.ok) {
-      if (res.message) await bridge.showError(res.message); // a frame error; a plain cancel is silent
+      if (res.message) await host.showError(res.message); // a frame/decode error; a plain cancel is silent
       return;
     }
-    if (isReusable(getView().state.doc, dirty, currentPath)) {
-      // Reuse in place: validate + load the decoded doc through the seam (a bad doc leaves the current one intact).
+    if (host.platform === "desktop" && isReusable(getView().state.doc, dirty, currentPath)) {
+      // Desktop reuse in place: validate + load the decoded doc through the seam (a bad doc leaves the current one intact).
       let doc: PMNode;
       try {
         doc = docFromJson(res.docJson); // root-type assert + nodeFromJSON + check(); throws on a bad doc
       } catch (err) {
-        await bridge.showError(err instanceof Error ? err.message : "Could not open the file.");
+        await host.showError(err instanceof Error ? err.message : "Could not open the file.");
         return;
       }
       loadDoc(doc);
@@ -256,77 +168,38 @@ if (mount) {
       getView().focus();
       return;
     }
-    // Not reusable → hand the decoded payload to a freshly spawned window (MAIN stashes it for that window's PULL).
-    await bridge.requestNewWindow({ docJson: res.docJson, path: res.path });
-  };
-
-  // Show an error to the user. Desktop routes to MAIN's native dialog; web (no bridge) shows an in-renderer
-  // dismissible banner (defined in the boot IIFE once the DOM is up). Single seam so the file handlers below don't
-  // each branch on platform. `webShowError` is a no-op until boot wires it (never called pre-boot in practice).
-  let webShowError: (message: string) => void = () => {};
-  // A neutral (non-error) web toast seam for transient confirmations — e.g. "Saved t.fl" after a successful web
-  // save, so the user gets VISIBLE feedback that Ctrl+S worked (rather than a silent success that reads as "nothing
-  // happened"). Wired in the boot isWeb block alongside webShowError; a no-op until then (never called pre-boot).
-  let webNotify: (message: string) => void = () => {};
-  const showError = async (message: string): Promise<void> => {
-    if (isWeb) webShowError(message);
-    else await window.flowline?.showError(message);
+    // Otherwise adopt the opened doc in a fresh surface: desktop → a new window (MAIN stashes the payload for its
+    // PULL); web → a new in-window doc that adopts the FSA handle host.open() just stashed (§S3 problem #1).
+    await host.newDocument({ docJson: res.docJson, path: res.path });
   };
 
   // Never PERSIST a check()-invalid doc — Open runs check() and would refuse it, so writing one means an
   // unreopenable file. A null-blockId block can still arise from a structural replace over a node-selection (a
   // pre-existing editor-core edge the paste guard now avoids on the paste path); refuse to save/export rather
-  // than write a file that can't be reopened. Returns the doc JSON, or null after showing the error.
+  // than write a file that can't be reopened. Returns the doc JSON, or null after surfacing the error via the host
+  // (desktop native dialog / web toast). Reached only from doSave/doExport.
   const validDocJson = async (): Promise<unknown | null> => {
     try {
       getView().state.doc.check();
     } catch {
-      await showError("This document has an invalid block and cannot be saved. Undo your last change and try again.");
+      await host.showError("This document has an invalid block and cannot be saved. Undo your last change and try again.");
       return null;
     }
     return getView().state.doc.toJSON();
   };
 
-  // Save (Ctrl+S → save to the current path, prompting only if none) / Save As (always prompt).
-  //
-  // WEB: write a real `.fl` via the File System Access API (a reusable handle ⇒ plain Save overwrites in place) or
-  // a Blob download fallback. The active registry entry's handle/path/dirty are updated on success (S2). A
-  // cancelled picker leaves dirty set (so the close-guard correctly aborts). Byte format == desktop (envelope-frame).
+  // Save (Ctrl+S → save to the current path, prompting only if none) / Save As (always prompt). Routed through the
+  // host: desktop → MAIN dialog + fs; web → a real `.fl` via the File System Access API (a reusable handle ⇒
+  // overwrite in place) or a Blob download — WebHost updates its registry entry's handle/path/dirty + the Documents
+  // pane + the "Saved …" / denied-permission toast internally, and returns a SaveResult; main.ts adopts the resulting
+  // path into the session state. A cancelled picker returns {ok:false} with no message, leaving `dirty` set (so the
+  // close-guard correctly aborts). Byte format == desktop (envelope-frame).
   const doSave = async (forceDialog: boolean): Promise<void> => {
-    if (isWeb) {
-      const json = await validDocJson();
-      if (json === null) return;
-      const id = registry.activeId();
-      const res = await webSaveFl(getView().state.doc, {
-        handle: id ? handles.get(id) ?? null : null,
-        forceDialog,
-        suggestedName: currentPath ?? fileLabel(),
-      });
-      if (!res.ok) {
-        if (res.message) await showError(res.message); // a cancel is silent (leaves dirty set → close aborts)
-        return;
-      }
-      if (id) handles.set(id, res.handle);
-      currentPath = res.name;
-      dirty = false;
-      registry.setActivePath(currentPath);
-      registry.setActiveDirty(false);
-      updateTitle();
-      renderWebDocs();
-      // Honesty: when the user DENIED the write permission on a handled save, webSaveFl wrote a NEW copy to
-      // Downloads (not the original). The bytes ARE safely persisted (so dirty/path above are correct), but tell
-      // the user WHERE — otherwise they'd believe they overwrote their original file. Uses the toast seam.
-      if (res.downloadedFallback) await showError("Permission denied — saved a copy to Downloads instead.");
-      else webNotify(`Saved ${currentPath}`); // visible confirmation that the (Ctrl+S) save succeeded
-      return;
-    }
-    const bridge = window.flowline;
-    if (!bridge) return;
     const json = await validDocJson();
     if (json === null) return;
-    const res = forceDialog ? await bridge.saveAs(json) : await bridge.save(json, currentPath ?? undefined);
+    const res = forceDialog ? await host.saveAs(json) : await host.save(json, currentPath ?? undefined);
     if (!res.ok) {
-      if (res.message) await bridge.showError(res.message);
+      if (res.message) await host.showError(res.message); // a cancel is silent (leaves dirty set → close aborts)
       return;
     }
     currentPath = res.path;
@@ -334,74 +207,37 @@ if (mount) {
     updateTitle();
   };
 
-  // Unsaved-work guard, shared by New, Open, and the window-close attempt. Returns true if it is safe to
-  // PROCEED (discard the current doc / close), false to ABORT. When the doc is clean there is nothing to guard, so
-  // proceed. Otherwise prompt (desktop: native dialog; web: in-renderer Save/Discard/Cancel modal — webPrompt):
-  //   - cancel  → abort (return false)
-  //   - save    → run doSave; proceed ONLY if the save actually cleared `dirty` (a cancelled Save-As / write
-  //               error leaves `dirty` set, so we abort rather than silently lose the work)
-  //   - discard → proceed (return true), dropping the unsaved edits
-  // The decision (clean ⇒ no prompt; the 3-way resolution) is the PURE close-guard (close-guard.ts), shared by web
-  // and tested independently — this just runs the platform prompt + the (web) doSave, then asks it to decide.
+  // Unsaved-work guard, shared by New, Open, and the window-close attempt. Returns true if it is safe to PROCEED
+  // (discard the current doc / close), false to ABORT. When the doc is clean there is nothing to guard, so proceed.
+  // Otherwise prompt via the host (desktop: native dialog; web-solo: in-renderer Save/Discard/Cancel modal —
+  // host.confirmUnsaved); the PURE close-guard (close-guard.ts) resolves the 3-way answer identically on both:
+  //   - cancel  → abort (false)
+  //   - save    → run doSave; proceed ONLY if it actually cleared `dirty` (a cancelled Save-As / write error leaves
+  //               `dirty` set, so we abort rather than silently lose the work)
+  //   - discard → proceed (true), dropping the unsaved edits
   const guardUnsaved = async (): Promise<boolean> => {
-    if (isWeb) {
-      if (!needsClosePrompt(dirty)) return true; // clean → no prompt (S5)
-      const choice = await webPrompt();
-      if (choice === "save") await doSave(false); // may itself prompt for a path; dirty clears iff it succeeded
-      return resolveClose(choice, !dirty) === "close";
-    }
-    const bridge = window.flowline;
-    if (!dirty || !bridge) return true;
-    const choice = await bridge.confirmUnsaved();
-    if (choice === "cancel") return false;
-    if (choice === "save") {
-      await doSave(false); // may itself prompt (no current path); dirty clears iff the save succeeded
-      return !dirty;
-    }
-    return true; // discard
+    if (!needsClosePrompt(dirty)) return true; // clean → no prompt
+    const choice = await host.confirmUnsaved();
+    if (choice === "save") await doSave(false); // may itself prompt for a path; dirty clears iff it succeeded
+    return resolveClose(choice, !dirty) === "close";
   };
 
-  // Export to Word: prompt + write a .docx; does not affect the current .fl path or the dirty flag.
-  //
-  // WEB: docx CAN bundle for the browser (Packer.toBlob), so Export is OFFERED on web too — it downloads a .docx
-  // built from the SAME IR/Document as desktop (S7). See persistence/web-docx.ts for the bundling decision.
+  // Export to Word: prompt + write a .docx; does not affect the current .fl path or the dirty flag. Routed through
+  // the host: desktop → MAIN dialog + write; web → web-docx bundles a Blob download from the SAME IR/Document
+  // (host.exportDocx forwards the suggested name; desktop ignores it and prompts).
   const doExport = async (): Promise<void> => {
-    if (isWeb) {
-      const json = await validDocJson();
-      if (json === null) return;
-      const res = await webExportDocx(json, currentPath ?? fileLabel());
-      if (!res.ok) await showError(res.message);
-      return;
-    }
-    const bridge = window.flowline;
-    if (!bridge) return;
     const json = await validDocJson();
     if (json === null) return;
-    const res = await bridge.exportDocx(json);
-    if (!res.ok && res.message) await bridge.showError(res.message);
+    const res = await host.exportDocx(json, currentPath ?? fileLabel());
+    if (!res.ok && res.message) await host.showError(res.message);
   };
 
-  // The MAIN-orchestrated SEQUENTIAL quit guard. MAIN shows+focuses this window and sends "flowline:quitGuard"
-  // one window at a time during a Quit; we run the SAME unsaved-work guard as a close and reply "clear" (safe to quit
-  // this window — saved/discarded/clean) or "cancel" (abort the whole quit). If the guard itself throws we reply
-  // "clear" so a guard failure never wedges the quit. Distinct channel from the single-window close-request.
-  // Registered HERE — SYNCHRONOUSLY, before the boot IIFE's `await getInitialDoc` below — on purpose: if it lived
-  // inside the IIFE (after the await), a Quit fired during this window's boot round-trip would hit a not-yet-
-  // subscribed renderer, the quitGuard would be dropped (ipcRenderer.on has no buffering), and MAIN's reply-await
-  // would hang the whole app. guardUnsaved is safe pre-view: `dirty` is false until the first edit (which needs the
-  // built view), so it returns "clear" immediately without touching getView().
-  window.flowline?.onQuitGuard(() => {
-    void (async () => {
-      try {
-        window.flowline?.replyQuitGuard((await guardUnsaved()) ? "clear" : "cancel");
-      } catch {
-        window.flowline?.replyQuitGuard("clear"); // never wedge the quit on a guard failure
-      }
-    })();
-  });
+  // (The MAIN-orchestrated SEQUENTIAL quit guard is registered through the desktop `shell` in the EditorHost seam
+  // block below — still SYNCHRONOUSLY, before the boot IIFE's `await getInitialDoc`, preserving §R6. It moved past
+  // the sidebar because it now needs the resolved `shell`, which depends on `rt` + the sidebar-backed web deps.)
 
-  // createModal — a lightweight in-renderer modal scaffold (the web unsaved-changes prompt). Browsers have no
-  // built-in app-styled confirm, so we render our own: a dim full-screen backdrop + a centered dialog with a title,
+  // createModal — a shared lightweight in-renderer modal scaffold (the web unsaved-changes prompt). Browsers have no
+  // built-in text-input dialog, so we render our own: a dim full-screen backdrop + a centered dialog with a title,
   // optional text fields, and a primary/Cancel action row. Keys are trapped ON the overlay (Enter=submit,
   // Escape=cancel, Tab/Shift-Tab cycle the dialog's own controls) and stopped from propagating so the editor's
   // ProseMirror keymaps never see them; a backdrop click dismisses. Only ONE modal opens at a time. The caller
@@ -421,7 +257,7 @@ if (mount) {
     onCancel?: () => void;
   };
   // createModal routes through the SHARED overlay primitive (settings.ts `openOverlay`) so the modal and the
-  // Settings overlay share ONE module-level latch and can never stack (E7-S3). openOverlay owns the backdrop, the
+  // Settings overlay share ONE module-level latch and can never stack. openOverlay owns the backdrop, the
   // single-instance latch, the Escape/backdrop-click dismiss, and the Tab focus-trap; createModal supplies only the
   // dialog BODY (title + inputs + actions) and its Enter=submit handler.
   const createModal = (spec: ModalSpec): void => {
@@ -448,9 +284,12 @@ if (mount) {
 
       // openOverlay's `close` takes no args and so cannot distinguish a dismiss (Escape/backdrop/Cancel) from a
       // submit/extra-action. The web close-guard NEEDS that distinction — a dismiss must resolve to "cancel" (keep
-      // the doc open) via `onCancel`, and it adds a middle "Discard" button via `extraActions`. We bridge here:
-      // `decided` is a one-shot latch set true ONLY by submit / an extra-action; a dismiss fires `spec.onCancel`
-      // exactly once (guarded by `cancelFired`) on any close where `decided` is still false.
+      // the doc open) via `onCancel`, and it adds a middle "Discard" button via `extraActions`. We bridge the two
+      // here: `decided` is a one-shot latch set true ONLY by submit / an extra-action; the listeners below fire
+      // `spec.onCancel` exactly once on any close where `decided` is still false. Escape/backdrop call openOverlay's
+      // `close` directly, so we also hang onCancel off the overlay teardown via the Cancel button + our own
+      // Escape/backdrop listeners; to cover the openOverlay-internal Escape/backdrop paths without double-firing,
+      // onCancel is guarded by `decided` and the one-shot `cancelFired`.
       let decided = false; // set by submit or an extra-action — a deliberate choice, NOT a dismiss
       let cancelFired = false; // one-shot so onCancel fires at most once across the (possibly multiple) close paths
       // Fire onCancel exactly once iff this teardown was a genuine dismiss (no submit/extra-action ran first).
@@ -507,7 +346,9 @@ if (mount) {
         close();
       });
       // Enter submits. openOverlay's keytrap already stops the key from reaching the editor and handles
-      // Escape/Tab; this listener only adds the modal-specific Enter=submit, then prevents the default.
+      // Escape/Tab; this listener only adds the modal-specific Enter=submit, then prevents the default. Escape and
+      // backdrop dismissal go through openOverlay's own `close`; we fire onCancel for those here so the close-guard
+      // sees a "cancel" on ANY dismissal (guarded by `decided`/`cancelFired` to never fire after a real choice).
       dialog.addEventListener("keydown", (e) => {
         if (e.key === "Enter") {
           e.preventDefault();
@@ -526,7 +367,12 @@ if (mount) {
 
       // Focus order: each field, then submit, then any extra actions, then cancel (openOverlay focuses the first +
       // traps Tab within).
-      const focusables: HTMLElement[] = [...spec.fields.map((f) => inputs[f.key]), submitBtn, ...extraBtns, cancelBtn];
+      const focusables: HTMLElement[] = [
+        ...spec.fields.map((f) => inputs[f.key]),
+        submitBtn,
+        ...extraBtns,
+        cancelBtn,
+      ];
       // Select the first field's text so the user can type/replace immediately (openOverlay focuses it).
       const first = spec.fields[0] ? inputs[spec.fields[0].key] : null;
       first?.select();
@@ -537,49 +383,231 @@ if (mount) {
   // Resolve the editor configuration and mount it through the view factory + dispatch seam.
   const rt = buildEditorRuntime();
 
-  // The single tabbed sidebar (Documents | Outline). It reads the doc READ-ONLY (buildOutline) and
-  // scrolls a clicked heading into view THROUGH the existing dispatch seam (no mutation, no new dispatch path).
-  // A Documents click focuses that window via the bridge (absent in the bare browser preview → guarded `?.`). The
-  // "+ New document" button runs the SAME guarded New as File▸New (doNew, defined above so it is in scope here).
+  // The single tabbed sidebar (Documents | Outline). It reads the doc READ-ONLY (buildOutline) and scrolls a clicked
+  // heading into view THROUGH the existing dispatch seam (no mutation, no new dispatch path). A Documents click
+  // focuses that window via the host.
   const sidebar = createSidebar({
     getView,
     onFocusWindow: (winId) => {
-      void window.flowline?.focusWindow(winId);
+      void host.focusDocument(winId);
     },
+    // The Documents pane's "+ New document" button runs the SAME guarded New as File▸New (doNew: reuse an empty
+    // window or spawn a new one on desktop; a fresh in-window doc on web). doNew is defined above, so it is in
+    // scope here; the inlined catch surfaces a spawn failure through the same native error dialog the file ops use.
     onNewDoc: () => {
-      void doNew().catch(() => window.flowline?.showError("Could not create a new document."));
+      void doNew().catch(() => void host.showError("Could not create a new document."));
     },
   });
 
-  // Learn THIS window's id so the Documents pane can mark "this doc". Async; the sidebar re-marks the
-  // (possibly already-rendered) list when it resolves. Guarded — absent in the bare browser preview (no bridge).
-  void window.flowline?.getWinId().then((id) => sidebar.setSelfWinId(id));
+  // (This window's id → sidebar.setSelfWinId, the desktop Documents-pane "this doc" marker, now fires in the
+  // EditorHost seam block below — it needs the resolved `host` (host.getSelfRef), so it moved past resolveHost.)
 
-  // ── BOOT (initial doc) ─────────────────────────────────────────────────────────────────────────────────
-  // The whole view construction + post-view wiring runs inside an async IIFE so we can `await` the initial-doc
-  // PULL from MAIN before constructing the editor. PULL this window's initial doc from MAIN: `seed` → the
-  // DEV-gated stand-in intro doc (createSeedDoc, itself import.meta.env.DEV-guarded so seed.ts tree-shakes from a
-  // prod bundle); `empty` → a blank newDoc; `file` → decode docJson via the existing document-validation path and
-  // remember its path. A bare browser preview / the web build (no window.flowline) falls back to the seed.
+  // ── EditorHost platform seam (EditorHost refactor §S4 boot wiring + §S5 call-site migration) ──
+  // Resolve the ONE platform host now, in the SYNC boot zone (before the async IIFE). The preload bridge present →
+  // DesktopHost (handed back as `shell` too); absent → WebHost (shell null). The WebHost ctor SEEDS its registry
+  // synchronously (§R7) — which is exactly why this lives here and not in the IIFE — yet it only TOUCHES the live
+  // view at INTERACTION time (through the lazy getView/loadActiveEntry/dispatch below), never during boot. §S5
+  // migrated every File / menu / window call site + the boot initial-doc branch onto `host.*` and deleted the
+  // parallel inline `isWeb` web wiring, so this host is now the SOLE platform surface (there is no second path).
+  // `run` / `requestGuardedClose` / `dispatchMenuCommand` are HOISTED out of the boot IIFE to here so the sync-zone
+  // WebHost ctor can close over `dispatchMenuCommand` (it only reaches the view at call time via getView, post-ctor).
+
+  // Run an async menu/file action, surfacing a rejection through the same native error dialog the file ops use
+  // (rather than letting a rejected promise fail silently).
+  const run = (p: Promise<void>): void => {
+    void p.catch(() => void host.showError("That action could not be completed."));
+  };
+
+  // Make a registry entry the live editor — the §R8 view residue WebHost delegates back to main.ts: replace the doc
+  // through the SINGLE dispatch seam (LOAD_META so it is not counted as a user edit), adopt the entry's path/dirty,
+  // retitle, refocus. This is the ONLY view.dispatch path the host drives; the registry mechanics live in WebHost.
+  const loadActiveEntry = (entry: DocEntry): void => {
+    const view = getView();
+    const tr = view.state.tr.replaceWith(0, view.state.doc.content.size, entry.state.doc.content);
+    tr.setMeta(LOAD_META, true);
+    tr.setMeta("addToHistory", false);
+    tr.setSelection(Selection.atStart(tr.doc));
+    view.dispatch(tr);
+    currentPath = entry.path;
+    dirty = entry.dirty;
+    updateTitle();
+    view.focus();
+  };
+
+  // The SINGLE read of the preload bridge: present ⇒ desktop, absent ⇒ web. Read once into a local so neither the
+  // web-initial-doc gate below nor the resolveHost call re-touches the global — this is the one place main.ts looks
+  // at `window.flowline`; every platform decision after this goes through `host` / `shell`.
+  const bridge = window.flowline;
+
+  // The web platform's initial doc (no bridge): the DEV seed else a blank doc — matching the web boot branch.
+  // Computed ONCE here and shared by BOTH the WebHost registry seed (its §R7 ctor) AND the view the IIFE builds
+  // below (problem #2: createSeedDoc/newDoc mint RANDOM blockIds, so deriving it twice would desync the
+  // Documents-pane entry from the live doc). On desktop the bridge PULL supplies the real start doc, so this is an
+  // unused placeholder there — guard the DEV seed compute behind the no-bridge predicate so desktop pays nothing for it.
+  const webInitialDocKind: "seed" | "empty" = !bridge && import.meta.env.DEV ? "seed" : "empty";
+  const webInitialDoc: PMNode = webInitialDocKind === "seed" ? createSeedDoc() : newDoc();
+
+  // Resolve the host ONCE. `dispatch` is a lazy thunk over dispatchMenuCommand (defined just below) — the same
+  // forward-ref-through-a-closure idiom main.ts already uses for getView/run, resolved only at interaction time.
+  const { host, shell } = resolveHost({
+    bridge,
+    deps: {
+      initialDoc: webInitialDoc,
+      initialDocKind: webInitialDocKind,
+      makeEmptyDoc: newDoc,
+      getView,
+      getCurrentPath: () => currentPath,
+      getDirty: () => dirty,
+      loadActiveEntry,
+      guardUnsaved,
+      dispatch: (cmd) => dispatchMenuCommand(cmd),
+      sidebar,
+      mountMenuBar: (dom) => {
+        topbar?.querySelector(".fl-brand")?.after(dom);
+      },
+      createModal,
+    },
+  });
+
+  // §R6 — register the SEQUENTIAL quit guard SYNCHRONOUSLY, before the boot IIFE's first await (the getInitialDoc
+  // PULL). On a Quit, MAIN sends "flowline:quitGuard" one window at a time; we run the SAME unsaved-work guard as a
+  // close and reply "clear" (safe to quit this window) or "cancel" (abort the whole quit), replying "clear" on a
+  // guard throw so a failure never wedges the quit. `shell` is null on web (no MAIN, nothing to guard) — exactly
+  // today's no-bridge no-op. guardUnsaved is safe pre-view (`dirty` is false until the first edit). Pinned by
+  // tests/renderer/quit-guard-timing.test.ts (`.onQuitGuard(` must precede `getInitialDoc(`).
+  if (shell) {
+    const desktop = shell;
+    desktop.onQuitGuard(() => {
+      void (async () => {
+        try {
+          desktop.replyQuitGuard((await guardUnsaved()) ? "clear" : "cancel");
+        } catch {
+          desktop.replyQuitGuard("clear"); // never wedge the quit on a guard failure
+        }
+      })();
+    });
+  }
+
+  // Learn THIS window's id (DESKTOP) so the Documents pane can mark "this doc"; the sidebar re-marks the (possibly
+  // already-rendered) open-docs list when it resolves. Desktop-only: the web Documents pane (setWebDocs) self-marks
+  // from its registry, and host.getSelfRef on web is a registry STRING (not a winId) — so this stays gated to desktop,
+  // matching today's no-bridge no-op. Fire-and-forget; setSelfWinId runs once the winId resolves.
+  if (host.platform === "desktop") {
+    void host.getSelfRef().then((ref) => {
+      if (typeof ref === "number") sidebar.setSelfWinId(ref);
+    });
+  }
+
+  // The guarded window-close flow, shared by the Window>Close menu command and MAIN's close-request (desktop). Run
+  // the unsaved-work guard; only if it clears (or the guard itself throws) tell MAIN it is safe to close THIS window
+  // via the shell. WEB: there is no MAIN window — Window>Close closes the ACTIVE in-window doc through the SAME
+  // guarded path as the Documents-row x (closeWebDoc), so the x and Window>Close are ONE flow, never two.
+  const requestGuardedClose = async (): Promise<void> => {
+    if (host.platform === "web") {
+      // Web: Window>Close closes the ACTIVE in-window doc through the host's guarded close (the SAME path as the
+      // Documents-row ×).
+      await host.closeActiveDocument();
+      return;
+    }
+    try {
+      if (await guardUnsaved()) await shell?.requestClose();
+    } catch {
+      await shell?.requestClose(); // never trap the user if the guard itself fails
+    }
+  };
+
+  // The single renderer-side menu-command handler. BOTH the desktop native menu (relayed via shell.onMenuCommand)
+  // and the in-renderer menu bar (web) call this — one command path, no drift.
+  const dispatchMenuCommand = (cmd: MenuCommand): void => {
+    switch (cmd) {
+      case "new":
+        run(doNew()); // async (guards unsaved work first / spawns a window)
+        break;
+      case "open":
+        run(doOpen());
+        break;
+      case "save":
+        run(doSave(false));
+        break;
+      case "saveAs":
+        run(doSave(true));
+        break;
+      case "export":
+        run(doExport());
+        break;
+      // Edit menu: route undo/redo to PM's existing history commands through the single dispatch seam. These are the
+      // SAME commands bound to Mod-Z / Shift-Mod-Z in the runtime — the menu items carry registerAccelerator:false so
+      // PM's keymap stays the sole keyboard owner; the menu is a click affordance for the identical action.
+      // Cut/copy/paste arrive as NATIVE roles on the focused webContents (not these commands), so they're not handled
+      // here — PM's clipboard/pasteGuard handling stays intact.
+      case "edit:undo": {
+        const view = getView();
+        undo(view.state, view.dispatch);
+        view.focus();
+        break;
+      }
+      case "edit:redo": {
+        const view = getView();
+        redo(view.state, view.dispatch);
+        view.focus();
+        break;
+      }
+      // View menu: toggle the sidebar, or switch its tab (also forcing it visible so the chosen tab shows).
+      case "view:toggleSidebar":
+        sidebar.toggle();
+        break;
+      case "view:tabDocuments":
+        sidebar.setTab("documents");
+        sidebar.setVisible(true);
+        break;
+      case "view:tabOutline":
+        sidebar.setTab("outline");
+        sidebar.setVisible(true);
+        break;
+      // Window>Close: run the SAME guarded close flow MAIN's close-request uses (per-window unsaved guard).
+      case "window:close":
+        run(requestGuardedClose());
+        break;
+      default:
+        break;
+    }
+  };
+
+  // ── BOOT (initial doc) ──────────────────────────────────────────────────────────────────────────────────
+  // The whole view construction + post-view wiring runs inside an async IIFE so the desktop boot can `await` the
+  // initial-doc PULL from MAIN before constructing the editor:
+  //   - DESKTOP: PULL this window's initial doc from MAIN. `seed` → the DEV-gated stand-in intro doc (createSeedDoc,
+  //     itself import.meta.env.DEV-guarded so seed.ts tree-shakes from a prod bundle); `empty` → a blank newDoc;
+  //     `file` → decode docJson via the existing document-validation path and remember its path.
+  //   - WEB: no MAIN to PULL from — use the once-computed web initial doc. A bare browser preview keeps the seed.
   void (async () => {
     let initialDoc: PMNode;
-    const init = window.flowline ? await window.flowline.getInitialDoc() : ({ kind: "seed" } as const);
-    if (init.kind === "file") {
-      try {
-        initialDoc = docFromJson(init.docJson); // validated decode (root assert + check); throws on a bad doc
-        currentPath = init.path;
-      } catch {
-        // A corrupt hand-off should never strand the window blank-but-broken: fall back to an empty New doc and
-        // surface the error through the same native dialog the file ops use.
+    if (host.platform === "desktop") {
+      // Desktop: PULL this window's initial doc from MAIN (through the host). This stays AFTER the
+      // sync-zone shell.onQuitGuard registration (R6 timing — pinned by quit-guard-timing.test.ts).
+      const init = await host.getInitialDoc();
+      if (init.kind === "file") {
+        try {
+          initialDoc = docFromJson(init.docJson); // validated decode (root assert + check); throws on a bad doc
+          currentPath = init.path;
+        } catch {
+          // A corrupt hand-off should never strand the window blank-but-broken: fall back to an empty New doc and
+          // surface the error through the same native dialog the file ops use.
+          initialDoc = newDoc();
+          void host.showError("Could not open the file (it may be unreadable).");
+        }
+      } else if (init.kind === "empty") {
         initialDoc = newDoc();
-        void window.flowline?.showError("Could not open the file (it may be unreadable).");
+      } else {
+        // seed: DEV-only content. import.meta.env.DEV is statically false in prod so createSeedDoc tree-shakes out
+        // and a prod first-window falls back to a blank doc (MAIN only ever sends "seed" in DEV anyway).
+        initialDoc = import.meta.env.DEV ? createSeedDoc() : newDoc();
       }
-    } else if (init.kind === "empty") {
-      initialDoc = newDoc();
     } else {
-      // seed: DEV-only content. import.meta.env.DEV is statically false in prod so createSeedDoc tree-shakes out
-      // and a prod first-window falls back to a blank doc (MAIN only ever sends "seed" in DEV anyway).
-      initialDoc = import.meta.env.DEV ? createSeedDoc() : newDoc();
+      // Web: no MAIN to PULL from — use the once-computed web initial doc, the SAME node the WebHost registry was
+      // seeded with in the sync zone (§R7 / problem #2), so the Documents-pane entry and the live view never
+      // diverge. (Value-identical to a no-bridge `{kind:"seed"}` → DEV?createSeedDoc():newDoc() branch.)
+      initialDoc = webInitialDoc;
     }
 
     const view = createFlowlineView(mount, initialDoc, rt.plugins, (v, tr) => {
@@ -592,21 +620,17 @@ if (mount) {
       // dirty/path are session state, never in the doc.
       if (tr.docChanged && tr.getMeta(LOAD_META) !== true && !dirty) {
         dirty = true;
+        // updateTitle → reportDocState → host.reportDocState surfaces the ● wherever this doc is shown: desktop →
+        // MAIN's Documents broadcast; web → the WebHost in-window Documents row.
         updateTitle();
-        // Web MDI: a clean→dirty flip must surface the ● on this doc's Documents row. (Desktop reports dirty to
-        // MAIN via updateTitle→reportDocState; web has no MAIN, so re-render the in-window list here.)
-        if (isWeb) {
-          registry.setActiveDirty(true);
-          renderWebDocs();
-        }
       }
     });
     viewRef.current = view;
 
     if (topbar) topbar.appendChild(toolbar.dom);
-    // ALWAYS-PRESENT Settings gear: a ⚙ button in the topbar that opens the Settings overlay to the Appearance
-    // section (theme picker). The builtin Appearance section + light/dark themes are registered once at module-init
-    // above.
+    // The Settings gear: a ⚙ button in the topbar that opens the Settings overlay to the Appearance section (theme
+    // picker). This is the app-wide settings entry. The builtin Appearance section + light/dark themes are
+    // registered once at module-init below.
     if (topbar) {
       const settingsGear = document.createElement("button");
       settingsGear.type = "button";
@@ -632,203 +656,43 @@ if (mount) {
     updateTitle();
     view.focus();
 
-    // ── File/menu wiring ─────────────────────────────────────────────────────────────────────────────────
-    // Run an async menu action, surfacing a rejection through the same error path the file ops use, rather than
-    // letting a rejected promise fail silently.
-    const run = (p: Promise<void>): void => {
-      void p.catch(() => void showError("That action could not be completed."));
-    };
+    // ── WEB interactive chrome (installed via host.mountUI() below) ───────────────────────────────────────
+    // The web in-window wiring that used to live inline here — the registry seed, the toast seams, the unsaved
+    // prompt, the Documents-pane wiring, and the Ctrl+S/Ctrl+M accelerators — now lives in WebHost: the registry is
+    // seeded in its ctor (§R7), and the rest installs through host.mountUI() (called once in the menu-wiring section
+    // below, after the view + sidebar exist). Desktop has no counterpart — its menu is the native Electron menu,
+    // relayed via shell.onMenuCommand. So this block is gone; nothing platform-specific runs here at boot anymore.
 
-    // ── WEB single-user wiring (E10b) ────────────────────────────────────────────────────────────────────
-    // Everything here runs ONLY in web (no preload bridge). It activates the in-window MDI registry, the web file
-    // dialogs/close-guard, and a Ctrl/Cmd+S interceptor. Desktop (bridge) skips this block entirely, so its
-    // behavior is byte-for-byte unchanged.
-    if (isWeb) {
-      // 1) Seed the registry with the boot doc so the Documents list has the initial doc as its first entry.
-      registry.add(EditorState.create({ schema, doc: initialDoc }), currentPath);
-      handles.set(registry.activeId()!, null);
+    // ── File/menu wiring (routed through the EditorHost seam — §S4) ──────────────────────────────────────
+    // `run` / `requestGuardedClose` / `dispatchMenuCommand` now live in the sync-zone seam block above (hoisted so
+    // the WebHost ctor can close over the dispatcher); the boot IIFE here only SUBSCRIBES the platform handlers.
+    //
+    // Desktop (Electron): the NATIVE menu owns File/Edit/View/Window and relays clicks via the shell. We do NOT add
+    // the in-renderer bar there: it would just duplicate the native menu and clutter the topbar (user 2026-06-18:
+    // "if standalone, remove the web-styled pane, keep the original panes"). `shell` is null on web → not subscribed
+    // (matches today's no-bridge no-op).
+    shell?.onMenuCommand(dispatchMenuCommand);
+    // Web (no shell): install the WebHost interactive chrome now that the view + sidebar exist — the in-renderer
+    // menubar (surfacing the same commands via dispatchMenuCommand), the Documents pane, and the Ctrl+S/Ctrl+M
+    // accelerators. Desktop mounts nothing here (its native Electron menu is relayed via shell.onMenuCommand above).
+    // `mountUI` is a WebHost-specific method, hence the instanceof narrow (not on EditorHost).
+    if (host instanceof WebHost) host.mountUI();
 
-      // 2) A lightweight in-renderer toast (no native dialog on web): a dismissible fl-prefixed banner that
-      // auto-removes. One builder, two seams — `webShowError` (role=alert, persists longer) for failures, and
-      // `webNotify` (role=status, brief) for transient confirmations like "Saved". Both are module-scope seams the
-      // file handlers (defined before boot) route through.
-      const showToast = (message: string, role: "alert" | "status", autoMs: number): void => {
-        const toast = document.createElement("div");
-        toast.className = role === "status" ? "fl-toast fl-toast--ok" : "fl-toast";
-        toast.setAttribute("role", role);
-        toast.textContent = message;
-        const dismiss = document.createElement("button");
-        dismiss.type = "button";
-        dismiss.className = "fl-toast-close";
-        dismiss.textContent = "×";
-        dismiss.setAttribute("aria-label", "Dismiss");
-        dismiss.addEventListener("click", () => toast.remove());
-        toast.appendChild(dismiss);
-        document.body.appendChild(toast);
-        setTimeout(() => toast.remove(), autoMs);
-      };
-      webShowError = (message: string): void => showToast(message, "alert", 6000);
-      webNotify = (message: string): void => showToast(message, "status", 2200);
-
-      // 3) The web unsaved-changes prompt: the SAME Save/Discard/Cancel choice as the desktop native dialog,
-      // rendered with the shared modal scaffold. Resolves with the UnsavedChoice. (A backdrop-dismiss / Escape
-      // resolves "cancel" — the safe default that keeps the doc open.) One prompt at a time (createModal latches).
-      webPrompt = (): Promise<UnsavedChoice> =>
-        new Promise<UnsavedChoice>((resolve) => {
-          let answered = false;
-          const settle = (choice: UnsavedChoice): void => {
-            if (answered) return;
-            answered = true;
-            resolve(choice);
-          };
-          createModal({
-            title: "You have unsaved changes",
-            fields: [],
-            submitLabel: "Save",
-            onSubmit: () => settle("save"),
-            extraActions: [{ label: "Discard", onClick: () => settle("discard") }],
-            onCancel: () => settle("cancel"),
-          });
-        });
-
-      // 4) Wire the Documents pane to the registry. renderWebDocs (the module-scope seam) re-renders from the live
-      // registry; select switches the active doc; close runs the guarded close for that doc.
-      renderWebDocs = (): void =>
-        sidebar.setWebDocs(registry.list(), {
-          onSelect: (id) => {
-            if (registry.activeId() === id) return; // already active → no-op
-            parkActive();
-            if (registry.select(id)) activateEntry();
-          },
-          onClose: (id) => {
-            void closeWebDoc(id);
-          },
-          onNew: () => {
-            void doNew();
-          },
-        });
-      sidebar.setTab("documents"); // web opens on the Documents pane so the MDI list is visible
-      renderWebDocs();
-
-      // 5) Web accelerators (no Electron native menu here, so the renderer binds them itself). Capture phase +
-      // preventDefault so the browser's own action never fires. Other keys fall through to ProseMirror untouched.
-      //   • Ctrl/Cmd+S → app Save (Shift = Save As) instead of the browser "save page" (S1).
-      //   • Ctrl+M → New document. (Plain Ctrl+N is browser-reserved for a new window, and Ctrl+Alt+N is grabbed
-      //     upstream by AltGr/assistive-tech — neither reaches the page; Ctrl+M is the reliable web New chord.
-      //     See web-keys.ts isNewChord. New is also one click away via the menu + the Documents "New" button.)
-      window.addEventListener(
-        "keydown",
-        (e) => {
-          if (isSaveChord(e)) {
-            e.preventDefault(); // stop the browser's "save page" (S1)
-            run(isSaveAsChord(e) ? doSave(true) : doSave(false)); // Shift = Save As
-          } else if (isNewChord(e)) {
-            e.preventDefault();
-            run(doNew()); // same guarded New as File▸New / the Documents "New" button
-          }
-        },
-        { capture: true },
-      );
-    }
-
-    // The guarded window-close flow, shared by the Window>Close menu command and MAIN's close-request. Desktop:
-    // run the unsaved-work guard; only if it clears (or the guard itself throws) tell MAIN it is safe to close THIS
-    // window. WEB: there is no MAIN window to close — Window>Close closes the ACTIVE in-window doc through the SAME
-    // guarded path as the Documents-row x (closeWebDoc), so S5 (the x) and S6 (Window>Close) are ONE flow.
-    const requestGuardedClose = async (): Promise<void> => {
-      if (isWeb) {
-        const id = registry.activeId();
-        if (id) await closeWebDoc(id);
-        return;
-      }
-      try {
-        if (await guardUnsaved()) await window.flowline?.requestClose();
-      } catch {
-        await window.flowline?.requestClose(); // never trap the user if the guard itself fails
-      }
-    };
-
-    // The single renderer-side menu-command handler. BOTH the native menu (relayed via the preload bridge, desktop
-    // only) and the in-renderer menu bar (mounted below on web) call this — one command path, no drift.
-    const dispatchMenuCommand = (cmd: MenuCommand): void => {
-      switch (cmd) {
-        case "new":
-          run(doNew()); // async (guards unsaved work first / spawns a window)
-          break;
-        case "open":
-          run(doOpen());
-          break;
-        case "save":
-          run(doSave(false));
-          break;
-        case "saveAs":
-          run(doSave(true));
-          break;
-        case "export":
-          run(doExport());
-          break;
-        // Edit menu: route undo/redo to PM's existing history commands through the single dispatch seam. These
-        // are the SAME commands bound to Mod-Z / Shift-Mod-Z in the runtime — the menu items carry
-        // registerAccelerator:false so PM's keymap stays the sole keyboard owner; the menu is a click affordance for
-        // the identical action. Cut/copy/paste arrive as NATIVE roles on the focused webContents (not these
-        // commands), so they're not handled here — PM's clipboard/pasteGuard handling stays intact.
-        case "edit:undo": {
-          const v = getView();
-          undo(v.state, v.dispatch);
-          v.focus();
-          break;
-        }
-        case "edit:redo": {
-          const v = getView();
-          redo(v.state, v.dispatch);
-          v.focus();
-          break;
-        }
-        // View menu: toggle the sidebar, or switch its tab (also forcing it visible so the chosen tab shows).
-        case "view:toggleSidebar":
-          sidebar.toggle();
-          break;
-        case "view:tabDocuments":
-          sidebar.setTab("documents");
-          sidebar.setVisible(true);
-          break;
-        case "view:tabOutline":
-          sidebar.setTab("outline");
-          sidebar.setVisible(true);
-          break;
-        // Window>Close: run the SAME guarded close flow MAIN's close-request uses (per-window unsaved guard).
-        case "window:close":
-          run(requestGuardedClose());
-          break;
-        default:
-          break;
-      }
-    };
-    // Desktop (Electron): the NATIVE menu owns File/Edit/View/Window and stays visible — it relays accelerator/menu
-    // clicks here. We do NOT add the in-renderer bar there: it would just duplicate the native menu and clutter the
-    // topbar (user 2026-06-18: "if standalone, remove the web-styled pane, keep the original panes").
-    window.flowline?.onMenuCommand(dispatchMenuCommand);
-    // Web (no preload bridge): there is NO native menu, so mount the in-renderer menu bar after the brand to surface
-    // the same commands via the SAME dispatchMenuCommand. File (New/Open/Save/Export) and Window>Close are wired on
-    // web via the `isWeb` block above (FSA + Blob-download fallbacks).
-    if (!window.flowline) {
-      const menubar = createMenuBar({ dispatch: dispatchMenuCommand });
-      topbar?.querySelector(".fl-brand")?.after(menubar.dom);
-    }
-
-    // Handle a window-close attempt. Main intercepts the close and emits "flowline:close-request"; we run the
-    // shared guarded close flow and, only if it clears, tell main it is safe to close (which re-issues the close).
-    // A "cancel" / a still-dirty failed save aborts — the window stays open. Absent in the bare browser preview.
-    window.flowline?.onCloseRequest(() => {
+    // Handle a window-close attempt (desktop): MAIN intercepts the close and emits "flowline:close-request"; we run
+    // the shared guarded close flow and, only if it clears, tell MAIN it is safe to close (which re-issues the close).
+    // `shell` is null on web — there is no MAIN window to close (Window>Close there closes the active in-window doc
+    // through requestGuardedClose's web arm: host.closeActiveDocument), exactly today's no-bridge no-op.
+    shell?.onCloseRequest(() => {
       void requestGuardedClose();
     });
 
-    // Keep the Documents tab live. MAIN broadcasts the full open-windows list on every registry mutation
-    // (a window opens / closes / renames / changes dirty); the sidebar re-renders it. Absent in the bare preview.
-    window.flowline?.onOpenDocs((docs) => sidebar.setOpenDocs(docs));
+    // Keep the Documents tab live: desktop = MAIN broadcasts the full open-windows list on every registry mutation
+    // (a window opens / closes / renames / changes dirty) and the sidebar re-renders it; web = a no-op (the
+    // WebHost-owned in-window Documents pane drives itself). Both match today's behavior (web had no bridge here).
+    host.onOpenDocsChanged((docs) => sidebar.setOpenDocs(docs));
 
-    // (The SEQUENTIAL quit guard — window.flowline.onQuitGuard — is registered earlier, synchronously, BEFORE this
-    // boot IIFE's await, so a Quit during boot is never dropped. See the comment by that registration above.)
+    // (The §R6 SEQUENTIAL quit guard — shell.onQuitGuard — is registered earlier, synchronously, in the sync-zone
+    // seam block BEFORE this IIFE's await, so a Quit during boot is never dropped. See that registration above.)
 
     // Report the initial doc-state once the window is wired, so a freshly spawned window appears with its real title
     // (e.g. an Open-spawned window's filename) in every Documents tab even before the first edit. updateTitle above
@@ -837,10 +701,11 @@ if (mount) {
 
     // ── DEV-only e2e control surface ─────────────────────────────────────────────────────────────────────
     // `import.meta.env.DEV` is statically false in the production build, so this whole block is tree-shaken out
-    // of the shipped bundle.
+    // of the shipped bundle. ids/text/reorder/edit/caret read or drive the live view for the headless block specs.
     if (import.meta.env.DEV) {
       // The __flowlineCaret hook drives the caret THROUGH ProseMirror's dispatch (not native DOM selection) so
-      // headless tests (e2e/blocks.spec.ts) get a deterministic caret with no PM adoption race.
+      // headless tests (e2e/blocks.spec.ts) get a deterministic caret with no PM adoption race. DEV-only and
+      // tree-shaken from the production bundle.
       (window as unknown as { __flowlineCaret?: (selector: string, where: "end" | number) => void }).__flowlineCaret = (
         selector,
         where,
@@ -854,6 +719,34 @@ if (mount) {
         view.dispatch(view.state.tr.setSelection(TextSelection.near(view.state.doc.resolve(pos))).scrollIntoView());
         view.focus();
       };
+
+      // The e2e surface uses the pure helpers from runtime.ts (topLevelBlockIds / blockText / firstBodyPos) so
+      // edit/caret address the REAL seed's random body-paragraph ids (not the harness `${id}p1`).
+      const e2e = {
+        // ids: enumerate top-level blockIds directly from doc.content (DRY via the exported helper).
+        ids: (): string[] => topLevelBlockIds(view.state.doc),
+        // text: full textContent of a top-level block by its blockId.
+        text: (id: string): string => blockText(view.state.doc, id),
+        reorder: (id: string, dir: "up" | "down"): void => {
+          moveBlock(id, dir)(view.state, view.dispatch);
+        },
+        // edit: insert text at the first inline position inside block `id`. Guards pos > 0 so a bad id no-ops.
+        edit: (id: string, text: string): void => {
+          const pos = firstBodyPos(view.state.doc, id);
+          if (pos > 0) view.dispatch(view.state.tr.insertText(text, pos));
+        },
+        // caret: place a collapsed caret inside block `id`'s first textblock AND focus the editor — so a
+        // subsequent REAL keypress (e.g. Mod-z) reaches the keymap deterministically, without click geometry.
+        caret: (id: string): void => {
+          const pos = firstBodyPos(view.state.doc, id);
+          if (pos > 0) {
+            view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, pos)));
+            view.focus();
+          }
+        },
+      };
+
+      (window as unknown as { __flowlineE2E: { e2e: typeof e2e } }).__flowlineE2E = { e2e };
     }
-  })(); // end the async boot IIFE (awaited getInitialDoc before constructing the view)
+  })(); // end the async boot IIFE (the desktop boot awaited getInitialDoc before constructing the view)
 }

@@ -123,41 +123,19 @@ const CLEARABLE_MARKS = [
 ];
 
 /**
- * Strip every CLEARABLE_MARK from the target into `tr` (no dispatch, no scrollIntoView). The two cases are
- * byte-identical across clearMarks and clearFormatting, so both delegate here to keep the mark-strip in ONE
- * place:
- *  - cursor (`$cursor` non-null, empty selection): clear each stored mark so the next typed run is plain;
- *  - non-empty selection: remove every CLEARABLE_MARK across each selection range (positions stay valid —
- *    the strip is size-stable).
- * Never touches block nodes (no blockId churn). The caller decides return value, dispatch, and scroll.
+ * The byte-identical mark-strip shared by clearMarks and clearFormatting: at a bare cursor it clears the
+ * stored marks (so the next typed run is plain), otherwise it removes every CLEARABLE_MARK across each
+ * selection range. Mutates `tr` in place; callers own the gating decision and the dispatch. Factored out so
+ * the two Clear commands cannot drift in WHICH marks they strip or HOW — only their gating/structural steps
+ * (intentionally) differ. `$cursor` is the caller's already-resolved `sel.$cursor` (null for a non-text or
+ * non-empty selection); passing it in keeps this helper from re-deriving it and matching clearMarks exactly.
  */
 function stripClearableMarks(tr: Transaction, sel: Selection, $cursor: ResolvedPos | null): void {
   if (sel.empty) {
-    // A bare cursor with no text run ($cursor === null, e.g. a NodeSelection) has no stored-mark target,
-    // so the strip is a no-op there. A real cursor → clear each stored mark.
     if ($cursor) for (const m of CLEARABLE_MARKS) tr.removeStoredMark(m);
   } else {
     for (const r of sel.ranges) for (const m of CLEARABLE_MARKS) tr.removeMark(r.$from.pos, r.$to.pos, m);
   }
-}
-
-/**
- * Would stripClearableMarks actually remove a mark here? True iff a CLEARABLE_MARK is present on the target:
- *  - cursor: any stored/cursor mark whose type is in CLEARABLE_MARKS;
- *  - non-empty selection: any range carrying a CLEARABLE_MARK.
- * This is the CLEARABLE-ONLY gate clearFormatting uses to decide whether the mark-strip contributes a change
- * (so F12 can fall through on a plain target). It is deliberately NARROWER than clearMarks' own cursor gate,
- * which fires on ANY pending stored mark — hence a predicate distinct from that command's inlined check.
- */
-function hasClearableMarks(state: EditorState, sel: Selection, $cursor: ResolvedPos | null): boolean {
-  if (sel.empty) {
-    if (!$cursor) return false;
-    const marks = state.storedMarks ?? $cursor.marks();
-    return marks.some((m) => CLEARABLE_MARKS.includes(m.type));
-  }
-  return sel.ranges.some((r) =>
-    CLEARABLE_MARKS.some((m) => state.doc.rangeHasMark(r.$from.pos, r.$to.pos, m)),
-  );
 }
 
 /**
@@ -168,10 +146,6 @@ function hasClearableMarks(state: EditorState, sel: Selection, $cursor: Resolved
  *    F12 keystroke fall through rather than being silently eaten.
  *  - non-empty selection: remove all CLEARABLE_MARKS across every selected range. Selection is preserved.
  * Never touches block nodes (no blockId churn), so it is safe on any selection shape.
- *
- * GATING NOTE: the cursor case reports handled when ANY stored/cursor mark exists (`marks.length`), which is
- * deliberately BROADER than clearFormatting's clearable-only gate — clearMarks is the low-level "make the
- * next run plain" vocabulary, so any pending mark counts. The actual strip is shared (stripClearableMarks).
  */
 export const clearMarks: Command = (state, dispatch) => {
   const sel = state.selection;
@@ -183,7 +157,7 @@ export const clearMarks: Command = (state, dispatch) => {
     if (marks.length === 0) return false; // nothing to clear — don't swallow the keystroke
     if (dispatch) {
       const tr = state.tr;
-      stripClearableMarks(tr, sel, $cursor);
+      stripClearableMarks(tr, sel, $cursor); // cursor branch: clears stored marks (no scrollIntoView, as before)
       dispatch(tr);
     }
     return true;
@@ -191,7 +165,7 @@ export const clearMarks: Command = (state, dispatch) => {
 
   if (dispatch) {
     const tr = state.tr;
-    stripClearableMarks(tr, sel, $cursor);
+    stripClearableMarks(tr, sel, $cursor); // range branch: $cursor is null, so this strips across the ranges
     dispatch(tr.scrollIntoView());
   }
   return true;
@@ -214,7 +188,7 @@ const hard_break = schema.nodes.hard_break;
 // so it is pulled here alongside the block types this module touches directly.
 const { paragraph, analytic, heading, card, body, tag } = schema.nodes;
 
-/** Mint a fresh unit id through the StructureHost predicate surface (clean-room; never a node-name string). */
+/** Mint a fresh block id through the StructureHost predicate surface (clean implementation; never a node-name string). */
 const freshBlockId = (): string => structureHost.structure.newUnitId();
 
 /**
@@ -625,8 +599,8 @@ function reanchorSelection(tr: Transaction, from: number, to: number): void {
  * then each body paragraph → a top-level `paragraph` KEEPING its blockId (a card-body paragraph and a
  * top-level paragraph are the SAME node type, so the node object is RELOCATED as-is — id + content + marks
  * preserved — exactly like splitCardAtBody's trailing-paragraph reuse). The tag is an INTERIOR node with no
- * blockId, so the heading minted from it gets a fresh id; only the body paragraphs carry identity, so only
- * they keep theirs. ONE replaceWith; caret lands in the new heading. This is the inverse of convertToTag and
+ * blockId, so the heading minted from it gets a fresh id; only the body paragraphs carry their own blockId, so
+ * only they keep theirs. ONE replaceWith; caret lands in the new heading. This is the inverse of convertToTag and
  * the ONLY path that touches a structured card here — and it preserves every piece of the card's content
  * (any cite-marked source text rides along inside the body), so no required child is silently destroyed.
  */
@@ -643,7 +617,7 @@ function dissolveCardTo(
     const out: PMNode[] = [heading.create({ blockId: freshBlockId(), level }, tagNode.content)];
     // Each body paragraph is RELOCATED as a top-level paragraph: the node object is reused verbatim so its
     // blockId (and content + marks) carries onto the ejected top-level paragraph — minting a fresh id here
-    // would lose the relocated unit's identity (the card-line-split contract / identity-preserving move shape).
+    // would lose the relocated block's blockId (the card-line-split contract / structural move shape).
     bodyNode.forEach((p) => out.push(p));
     const tr = state.tr.replaceWith(pos, pos + cardNode.nodeSize, out);
     // caret into the new heading's content (heading opens at `pos`, content starts at pos+1).
@@ -795,7 +769,7 @@ function splitCardAtLine(
  *
  *  - Caret / selection inside ONE card child → the SELECTED LINE becomes the heading and everything
  *    BELOW it in the card ejects out as top-level paragraphs, in doc order. The selected line may be the tag
- *    or any body paragraph; identity is preserved (body paragraphs keep their ids; the tag-derived heading
+ *    or any body paragraph; blockIds are preserved (body paragraphs keep their ids; the tag-derived heading
  *    gets a fresh id). One transaction; the caret lands in the new heading. This is checked FIRST so a caret
  *    in tag/body0 promotes that exact line rather than always making the TAG the heading. The body[k≥1]
  *    front-card split is one sub-case of this.
@@ -901,8 +875,18 @@ export const clearFormatting: Command = (state, dispatch) => {
   const sel = state.selection;
   const $cursor = sel instanceof TextSelection ? sel.$cursor : null;
 
-  // What marks would be cleared (the clearable-only gate; see hasClearableMarks)?
-  const marksToClear = hasClearableMarks(state, sel, $cursor);
+  // What marks would be cleared (mirrors clearMarks' two cases)?
+  let marksToClear = false;
+  if (sel.empty) {
+    if ($cursor) {
+      const marks = state.storedMarks ?? $cursor.marks();
+      marksToClear = marks.some((m) => CLEARABLE_MARKS.includes(m.type));
+    }
+  } else {
+    marksToClear = sel.ranges.some((r) =>
+      CLEARABLE_MARKS.some((m) => state.doc.rangeHasMark(r.$from.pos, r.$to.pos, m)),
+    );
+  }
 
   // Which touched top-level blocks are convertible headings/analytics to reset → paragraph?
   const span = touchedTopLevelRange(state);
@@ -931,9 +915,9 @@ export const clearFormatting: Command = (state, dispatch) => {
     //    structural steps keeps the cursor path byte-identical to clearMarks. setSelection resets
     //    storedMarks, so the stored-mark clear below MUST run after it.
     if (resets.length > 0) reanchorSelection(tr, sel.from, sel.to);
-    // 3) Strip marks — the SAME size-stable mark-strip clearMarks runs (shared via stripClearableMarks).
-    //    Cursor → clear stored marks so the next typed run is plain; range → remove every CLEARABLE_MARK
-    //    across the ranges (positions still valid after the size-stable resets above).
+    // 3) Strip marks via the SHARED helper, so this is byte-identical to clearMarks. Cursor → clear stored
+    //    marks so the next typed run is plain; range → remove every CLEARABLE_MARK across the ranges
+    //    (positions still valid — the block resets are size-stable).
     stripClearableMarks(tr, sel, $cursor);
     dispatch(tr.scrollIntoView());
   }
@@ -1026,8 +1010,8 @@ export function convertToTag(): Command {
  * with `schema.nodeFromJSON(node.toJSON())` — a genuine rebuild from serialized form — so it is a NEW
  * node object that is nonetheless DEEP-EQUAL to the original (children, text, every mark + position,
  * hard_breaks) AND keeps the SAME blockId (the id is an attr → it round-trips; it is never re-minted).
- * That is the destroy-and-recreate move shape — an identity-preserving relocation: remove the old unit,
- * re-insert an identical unit elsewhere under the same id.
+ * Modelling a reorder as delete-then-reinsert under the same id keeps the move a clean structural operation:
+ * tombstone the old block, re-insert an identical block elsewhere under the same id.
  *
  * Delete + insert happen in ONE transaction. Insert position uses the UNCHANGED neighbour sizes from the
  * pre-delete doc: moving up lands the copy before the previous block (`startOffset - prevSize`); moving

@@ -7,8 +7,8 @@
 // `__flowlineCaret` affordance uses in main.ts). The Documents pane lists the open windows MAIN broadcasts and
 // focuses a window on click. All of that lives behind the small interface this returns so main.ts only wires.
 //
-// CONTAINMENT: every class is `fl-`-prefixed. The component owns no persisted state — toggling/visibility/
-// active-tab are pure in-memory affordances.
+// CONTAINMENT: every class is `fl-`-prefixed (CSS gate). No clean-implementation-forbidden identifiers. The component owns no
+// persisted state — toggling/visibility/active-tab are pure in-memory affordances.
 
 import { TextSelection } from "prosemirror-state";
 import type { EditorState } from "prosemirror-state";
@@ -17,8 +17,9 @@ import type { OpenDocEntry } from "../persistence/bridge";
 import type { DocView } from "./doc-registry";
 import { buildOutline, resolveBlockPos } from "./outline";
 
-// Which tab is showing. The two values map 1:1 to the two panes (only one mounted-visible at a time).
-type SidebarTab = "documents" | "outline";
+// Which tab is showing. Each value maps 1:1 to a pane (only one mounted-visible at a time). "versions" is the
+// ADDITIVE Version-History pane (Collab Loop 5) — present only when main.ts injects a `versionsPane` element.
+type SidebarTab = "documents" | "outline" | "versions";
 
 /**
  * The dependencies the sidebar needs from its host (renderer/main.ts). Kept to the minimum so the component is
@@ -29,6 +30,13 @@ type SidebarTab = "documents" | "outline";
 export interface SidebarDeps {
   readonly getView: () => EditorView;
   readonly onFocusWindow: (winId: number) => void;
+  /**
+   * The Version-History pane element (Collab Loop 5), built by main.ts via `createVersionsPanel`. OPTIONAL +
+   * ADDITIVE: when absent the sidebar is exactly today's two-tab (Documents | Outline) component; when present a
+   * third "Versions" tab + pane is appended, disturbing neither existing tab. Injected (not built here) because
+   * the panel needs the live view + the version store, which live in main.ts.
+   */
+  readonly versionsPane?: HTMLElement;
   /**
    * Create a new document — invoked by the "+ New document" button atop the DESKTOP Documents pane (mirrors the
    * web pane's button + File▸New). Optional: omitted in tests/contexts that don't wire New, where the button is
@@ -72,6 +80,48 @@ export interface Sidebar {
   setSelfWinId(winId: number): void;
 }
 
+// ── Shared Documents-row scaffolding (DRY across the desktop + web panes) ───────────────────────────────
+// Both Documents panes (desktop multi-window, web in-window MDI) share the SAME "+ New document" button shape
+// and the SAME per-row lead-in (the .fl-doc-entry container + the ▸ "here"/active marker + the ● dirty marker).
+// They legitimately diverge afterwards: desktop's row is itself a clickable <button>; web's row is a <div> holding
+// a separate switch <button> title and a × close <button>. These helpers build ONLY the identical scaffold; each
+// caller supplies its own row tag, title element, trailing extras, and click wiring. Pure DOM builders (no closure
+// state), so they live at module scope and stay unit-testable.
+
+/** The shared "+ New document" affordance atop both Documents panes. `onClick` differs per pane (desktop's
+ *  host onNewDoc vs the web registry onNew); everything else — class, label, aria-label — is identical. */
+function newDocButton(onClick: () => void): HTMLButtonElement {
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "fl-doc-new";
+  btn.textContent = "+ New document";
+  btn.setAttribute("aria-label", "New document"); // so screen readers don't read the literal "+"
+  btn.addEventListener("click", onClick);
+  return btn;
+}
+
+/** Build the shared lead-in of one Documents row: the `.fl-doc-entry` container (a <button> on desktop, a
+ *  <div> on web — `rowTag`), flagged `.fl-dirty`/`.fl-current` from `dirty`/`current`, plus the always-present
+ *  ▸ "here" span and ● dirty marker (kept present even when empty so titles stay left-aligned across rows).
+ *  Returns the container + the two marker spans so the caller can append its own title + trailing extras. */
+function buildDocRow(opts: {
+  readonly rowTag: "button" | "div";
+  readonly dirty: boolean;
+  readonly current: boolean;
+}): { row: HTMLElement; here: HTMLSpanElement; marker: HTMLSpanElement } {
+  const row = document.createElement(opts.rowTag);
+  row.className = "fl-doc-entry";
+  if (opts.dirty) row.classList.add("fl-dirty");
+  if (opts.current) row.classList.add("fl-current");
+  const here = document.createElement("span");
+  here.className = "fl-doc-current";
+  here.textContent = opts.current ? "▸" : "";
+  const marker = document.createElement("span");
+  marker.className = "fl-doc-marker";
+  marker.textContent = opts.dirty ? "●" : "";
+  return { row, here, marker };
+}
+
 // createSidebar — build the sidebar DOM + return the control surface. The outline re-render is data-driven:
 // each `syncOutline` rebuilds the pane from the pure outline derivation, so there is no stale DOM to patch.
 export function createSidebar(deps: SidebarDeps): Sidebar {
@@ -98,12 +148,22 @@ export function createSidebar(deps: SidebarDeps): Sidebar {
   outlineTab.className = "fl-sidebar-tab";
   outlineTab.textContent = "Outline";
   tabs.append(docTab, outlineTab);
+  // The Versions tab is ADDITIVE — only created when a versions pane was injected (Collab Loop 5).
+  const versionsTab = deps.versionsPane ? document.createElement("button") : null;
+  if (versionsTab) {
+    versionsTab.type = "button";
+    versionsTab.className = "fl-sidebar-tab";
+    versionsTab.textContent = "Versions";
+    tabs.append(versionsTab);
+  }
 
-  // The two panes — only the active one is shown (toggled via `.fl-active` + CSS display).
+  // The panes — only the active one is shown (toggled via `.fl-active` + CSS display).
   const docsPane = document.createElement("div");
   docsPane.className = "fl-sidebar-pane fl-doc-list";
   const outlinePane = document.createElement("div");
   outlinePane.className = "fl-sidebar-pane fl-outline";
+  // The injected Versions pane (already a `.fl-sidebar-pane`); null when VH is not wired.
+  const versionsPane = deps.versionsPane ?? null;
 
   // ── user-adjustable width ────────────────────────────────────────────────────────────────────────────
   // The width is driven by the `--fl-sidebar-w` custom property (CSS owns the actual width/flex-basis), dragged via
@@ -139,7 +199,9 @@ export function createSidebar(deps: SidebarDeps): Sidebar {
     document.addEventListener("mouseup", onUp);
   });
 
-  root.append(tabs, docsPane, outlinePane, resizer);
+  // Append the Versions pane (if any) between the outline pane and the resizer so it participates in the same
+  // single-pane-visible CSS rule. Additive: no effect when versionsPane is null.
+  root.append(tabs, docsPane, outlinePane, ...(versionsPane ? [versionsPane] : []), resizer);
 
   // ── Render helpers ───────────────────────────────────────────────────────────────────────────────
   // Reflect `visible` + `tab` onto the DOM. Visibility uses a class so CSS owns the actual hide rule (and the
@@ -150,6 +212,9 @@ export function createSidebar(deps: SidebarDeps): Sidebar {
     outlineTab.classList.toggle("fl-active", tab === "outline");
     docsPane.classList.toggle("fl-active", tab === "documents");
     outlinePane.classList.toggle("fl-active", tab === "outline");
+    // Versions tab/pane (additive; both null when VH is not wired).
+    versionsTab?.classList.toggle("fl-active", tab === "versions");
+    versionsPane?.classList.toggle("fl-active", tab === "versions");
   };
 
   // Documents pane: one clickable row per open window (a "this doc" caret + a ● dirty marker + the title),
@@ -161,30 +226,15 @@ export function createSidebar(deps: SidebarDeps): Sidebar {
     // "+ New document" affordance at the top of the desktop Documents pane (mirrors the web pane + File▸New) so New
     // is one click from the open-windows list — the user asked for parity with the web pane. Click runs the host's
     // New (a reused-empty / freshly-spawned window). Inert if the host didn't wire onNewDoc (tests).
-    const newBtn = document.createElement("button");
-    newBtn.type = "button";
-    newBtn.className = "fl-doc-new";
-    newBtn.textContent = "+ New document";
-    newBtn.setAttribute("aria-label", "New document"); // so screen readers don't read the literal "+"
-    newBtn.addEventListener("click", () => deps.onNewDoc?.());
-    docsPane.appendChild(newBtn);
+    docsPane.appendChild(newDocButton(() => deps.onNewDoc?.()));
 
     for (const entry of docs) {
-      const row = document.createElement("button");
-      row.type = "button";
-      row.className = "fl-doc-entry";
-      if (entry.dirty) row.classList.add("fl-dirty");
       // is this row THIS window? (selfWinId is null until getWinId resolves → nothing marked yet.)
       const isCurrent = selfWinId !== null && entry.winId === selfWinId;
-      if (isCurrent) row.classList.add("fl-current");
-      // A "you are here" caret on THIS window's row, then a ● dirty marker, then the title. Both indicator spans
-      // are ALWAYS present (CSS/▸ control their visibility) so titles stay left-aligned across every row.
-      const here = document.createElement("span");
-      here.className = "fl-doc-current";
-      here.textContent = isCurrent ? "▸" : "";
-      const marker = document.createElement("span");
-      marker.className = "fl-doc-marker";
-      marker.textContent = entry.dirty ? "●" : "";
+      // Shared scaffold: the row container is a <button> (the whole desktop row is the focus-window affordance),
+      // plus the always-present ▸ "here" caret + ● dirty marker so titles stay left-aligned across every row.
+      const { row, here, marker } = buildDocRow({ rowTag: "button", dirty: entry.dirty, current: isCurrent });
+      (row as HTMLButtonElement).type = "button";
       const title = document.createElement("span");
       title.className = "fl-doc-title";
       title.textContent = entry.title;
@@ -207,28 +257,13 @@ export function createSidebar(deps: SidebarDeps): Sidebar {
     const handlers = webHandlers;
 
     // "New document" affordance at the top of the list (mirrors File > New for discoverability on web).
-    const newBtn = document.createElement("button");
-    newBtn.type = "button";
-    newBtn.className = "fl-doc-new";
-    newBtn.textContent = "+ New document";
-    newBtn.setAttribute("aria-label", "New document"); // so screen readers don't read the literal "+"
-    newBtn.addEventListener("click", () => handlers.onNew());
-    docsPane.appendChild(newBtn);
+    docsPane.appendChild(newDocButton(() => handlers.onNew()));
 
     for (const doc of docs) {
-      // The row is a flex container (not itself a button) so it can hold a clickable title AND a separate close ×
-      // without nesting interactive elements (a button inside a button is invalid + breaks click semantics).
-      const row = document.createElement("div");
-      row.className = "fl-doc-entry";
-      if (doc.dirty) row.classList.add("fl-dirty");
-      if (doc.active) row.classList.add("fl-current");
-
-      const here = document.createElement("span");
-      here.className = "fl-doc-current";
-      here.textContent = doc.active ? "▸" : "";
-      const marker = document.createElement("span");
-      marker.className = "fl-doc-marker";
-      marker.textContent = doc.dirty ? "●" : "";
+      // The row is a flex <div> container (not itself a button) so it can hold a clickable title AND a separate
+      // close × without nesting interactive elements (a button inside a button is invalid + breaks click semantics).
+      // Shared scaffold supplies the ▸ active caret + ● dirty marker; `current` here means "the active doc".
+      const { row, here, marker } = buildDocRow({ rowTag: "div", dirty: doc.dirty, current: doc.active });
       // The title is the switch affordance — a button so keyboard users can activate it; click switches active doc.
       const title = document.createElement("button");
       title.type = "button";
@@ -354,6 +389,7 @@ export function createSidebar(deps: SidebarDeps): Sidebar {
   // ── Wire the tab buttons ─────────────────────────────────────────────────────────────────────────
   docTab.addEventListener("click", () => setTab("documents"));
   outlineTab.addEventListener("click", () => setTab("outline"));
+  versionsTab?.addEventListener("click", () => setTab("versions"));
 
   render(); // initial paint (Documents tab, visible, empty panes)
 

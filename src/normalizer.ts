@@ -1,23 +1,25 @@
-// normalizer.ts — the STRUCTURAL absorb normalizer (a standalone one-shot import-repair utility).
+// normalizer.ts — the STRUCTURAL absorb normalizer.
 //
-// WHAT IT DOES. A loose top-level `paragraph` that immediately follows a `card` is absorbed INTO that card's
-// `body` (the inverse direction of `convertToTag`'s absorb). It is a STRUCTURAL fixup (cross-block content
-// movement), not a mark-coalescer — it relocates whole paragraph nodes between blocks rather than merging
-// adjacent marks.
+// WHAT THIS DOES. This is a position/adjacency-sensitive, content-MUTATING, STRUCTURAL normalizer.
+// A loose top-level `paragraph` that immediately follows a `card` is absorbed INTO that card's `body`
+// (the inverse direction of `convertToTag`'s absorb). It is structural (cross-block content movement),
+// not a mark-coalescer — the interesting, hard-to-get-right case is the cross-card content move, not
+// mark-thrash, so this is written as a real structural rewrite rather than a coalescer stub.
 //
-// NOT WIRED INTO THE EDITOR (the wet-test verdict). An earlier build installed this normalizer LIVE through an
-// `appendTransaction` so a loose paragraph folded into the preceding card on caret-leave/click-off. The
+// NOT WIRED INTO THE EDITOR (the wet-test verdict). An earlier build installed this normalizer LIVE through the
+// editor's `appendTransaction` so a loose paragraph folded into the preceding card on caret-leave/click-off. The
 // wet-test rejected that behaviour: silently restructuring the user's document as the caret moves is surprising
-// and unwanted. So the plugin WIRING was removed — the renderer never installs the normalizer and the PRODUCT
-// NEVER auto-absorbs. The normalizer CODE is RETAINED as a standalone, explicitly-invoked structural repair
-// utility (run over a freshly-imported doc), and is exercised by tests/normalizer.test.ts.
+// and unwanted. So the editor's PLUGIN WIRING was removed — `absorbNormalizerPlugin` is gone and the renderer never
+// installs the normalizer, so the PRODUCT NEVER auto-absorbs. The normalizer CODE is RETAINED (in two shapes) as
+// the editor's structural absorb-normalizer: it is exported (and exercised by tests) but is not installed live, so
+// it can still be invoked explicitly as a one-shot repair.
 //
-// APPEND-TRANSACTION SHAPE (a reusable normalizer the editor does not install live). `liveNormalize`/
-// `absorbNormalizer` is a bare `appendTransaction`-shaped function with NO origin bypass of its own. Were it ever
-// installed live, anything wishing to skip it on a foreign-origin batch would gate it externally; keeping that
-// concern OUT of here keeps the function a single, reusable definition. It is NOT installed today.
+// PURE APPEND-TRANSACTION (no origin-based bypass of its own). This normalizer is a PLAIN `appendTransaction`
+// with NO transaction-origin filtering baked in. Keeping it free of any origin bypass is what lets the SAME
+// normalizer be reused or wrapped from ONE definition; the exported `absorbNormalizer` has exactly the
+// `AppendTransactionFn` shape callers expect (proven composed in the tests).
 //
-// LIVE PATH vs FULL SCAN ("dirty-region + debounced", and the full-scan utility).
+// LIVE PATH vs FULL SCAN ("dirty-region + debounced", and the test adversary).
 //   - The LIVE path (`liveNormalize`) is CARET-LEAVE driven, which is BOTH the dirty-region (it examines a single
 //     block — the one the caret just left — never the whole doc, O(1)) AND a "debounced" deferral:
 //     a loose paragraph after a card is absorbed only once the caret LEAVES it. It does NOT absorb a paragraph
@@ -25,20 +27,21 @@
 //     serious regression). The block the caret left is identified by its STABLE blockId, NOT by mapping the old
 //     caret position forward — a destroy+recreate reorder (moveBlock) collapses the old position onto an unrelated
 //     block seam, so a position-mapped "leave" would absorb a bystander run (the same class of regression). This
-//     path is NO LONGER installed in the editor.
+//     path is NO LONGER installed in the editor; it lives on solely as the live-shape entry point for explicit use.
 //   - The FULL-DOC scan (`fullScanNormalize`) examines EVERY top-level block, applies no deferral, and reports how
-//     many it touched. It is the intended one-shot IMPORT-REPAIR entry point (run explicitly over a freshly-
-//     imported doc; never on appendTransaction). A test asserts touch-count == top-level block count, pinning that
-//     the full scan really visits every block rather than only an adjacency-local subset.
+//     many it touched. A test asserts touch-count == top-level block count, proving the normalizer is the real
+//     full-scan rewriter and not an adjacency-local strawman; it is also the intended one-shot IMPORT-REPAIR entry
+//     point (run explicitly over a freshly-imported doc; never on appendTransaction).
 //
-// IDENTITY (no blockId minting — relocation, not destruction). An absorbed paragraph is REUSED
+// REUSE, NOT DESTRUCTION (no blockId minting). An absorbed paragraph is REUSED
 // verbatim: the same node object (its blockId, inline content, and every mark) becomes a body paragraph. The
 // scan NEVER mints or stamps a blockId. Because a top-level `paragraph` and a card-body `paragraph` are the SAME
 // node type, the move needs no re-wrapping and the rebuilt card stays `check()`-valid (`body := paragraph+`). To
-// keep the relocation invariant intact, the run collection STOPS before any paragraph whose blockId already
-// appears in the target body (it would otherwise create a duplicate unit id — a serious bug). Each absorb is
-// also exactly SIZE-PRESERVING (the card grows by precisely the paragraphs' node sizes, which leave the top
-// level), so positions after the absorbed run are unchanged and any selection outside the run maps through untouched.
+// keep the relocation invariant intact, the run collection STOPS before any paragraph
+// whose blockId already appears in the target body (it would otherwise create a duplicate unit id — a serious
+// bug). Each absorb is also exactly SIZE-PRESERVING (the card grows by precisely the
+// paragraphs' node sizes, which leave the top level), so positions after the absorbed run are unchanged and any
+// selection outside the run maps through untouched.
 //
 // FIXPOINT (no oscillation). The whole CONTIGUOUS run of absorbable paragraphs after a card is absorbed in a
 // SINGLE pass. ProseMirror does not re-invoke a plugin's `appendTransaction` on the very transaction that plugin
@@ -200,8 +203,8 @@ export function fullScanNormalize(state: EditorState): { tr: Transaction | null;
 }
 
 /**
- * The ProseMirror `appendTransaction` shape, defined locally so this module depends on nothing external: any
- * caller that wishes to install or wrap a normalizer can reuse this exact signature.
+ * The ProseMirror `appendTransaction` shape, defined locally so this editor module stays self-contained
+ * and imports nothing extra: callers wrap or compose a function of THIS shape.
  */
 export type AppendTransactionFn = (
   transactions: readonly Transaction[],
@@ -221,11 +224,12 @@ export type AppendTransactionFn = (
  * block). Placing the caret elsewhere, editing without leaving the paragraph, or reordering blocks never
  * triggers an unwanted absorb.
  *
- * The editor does NOT install this; it remains a reusable structural normalizer in bare `appendTransaction`
- * shape. `_transactions` is unused: tracking by blockId is position-independent, so the batch's step maps are
+ * The editor does NOT install this; it remains the REAL structural normalizer, available for explicit use.
+ * `_transactions` is unused: tracking by blockId is position-independent, so the batch's step maps are
  * irrelevant — which is what makes it robust to reorders.
  */
-export function liveNormalize(
+// Internal: the only external entry point is `absorbNormalizer` below; `liveNormalize` is its implementation.
+function liveNormalize(
   _transactions: readonly Transaction[],
   oldState: EditorState,
   newState: EditorState,
@@ -240,9 +244,9 @@ export function liveNormalize(
   if (typeof leftId !== "string") return { tr: null, touched: 0 }; // no stable id to track
 
   // Find that SAME block (by id) in the new doc — the actual block the caret may have left. If the id is
-  // AMBIGUOUS (it appears on >1 top-level block), BAIL: we cannot tell which occurrence the caret left, and
-  // guessing the first could absorb a block the user never touched. This mirrors the duplicate-body-id guard
-  // in scanAbsorptions — both refuse to act on an ambiguous unit id.
+  // AMBIGUOUS (it appears on >1 top-level block — a malformed-doc edge case), BAIL: we cannot tell
+  // which occurrence the caret left, and guessing the first could absorb a block the user never touched. This
+  // mirrors the duplicate-body-id guard in scanAbsorptions — both refuse to act on an ambiguous unit id.
   let leftIdx = -1;
   let matches = 0;
   newState.doc.forEach((node, _off, i) => {
@@ -251,7 +255,7 @@ export function liveNormalize(
       if (leftIdx < 0) leftIdx = i;
     }
   });
-  if (matches !== 1) return { tr: null, touched: 0 }; // gone (0) or ambiguous (>1) → defer
+  if (matches !== 1) return { tr: null, touched: 0 }; // gone (0) or ambiguous (>1, malformed doc) → defer
   if (leftIdx <= 0) return { tr: null, touched: 0 }; // first block has no preceding card to absorb into
 
   const deferred = selectionBlocks(newState);
@@ -264,8 +268,8 @@ export function liveNormalize(
 }
 
 /**
- * The live normalizer as a bare `AppendTransactionFn` — a reusable normalizer in plain appendTransaction shape.
- * NOT installed in the editor (the live auto-absorb was removed).
+ * The live normalizer as a bare `AppendTransactionFn` — the exact shape callers wrap or compose.
+ * NOT installed in the editor (the live auto-absorb was removed); exported for explicit, one-shot use.
  */
 export const absorbNormalizer: AppendTransactionFn = (transactions, oldState, newState) =>
   liveNormalize(transactions, oldState, newState).tr;

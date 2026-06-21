@@ -76,7 +76,7 @@ describe("buildEditorRuntime — single-user editor", () => {
     const state = EditorState.create({ schema, doc: rt.doc, plugins: rt.plugins });
     const edited = state.apply(state.tr.insertText("x", 1));
 
-    // The keymap's Mod-z and the imported `undo` produce the SAME dispatch on the SAME state (identity by
+    // The keymap's Mod-z and the imported `undo` produce the SAME dispatch on the SAME state (equality by
     // behavior): both pop one history event.
     const viaKeymap = pressUndo(edited, rt.plugins);
     let viaImport: Transaction | null = null;

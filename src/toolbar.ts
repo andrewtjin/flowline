@@ -1,6 +1,6 @@
 // toolbar.ts — the mark toolbar: four highlight colour swatches + emphasis + muted.
 //
-// Pure renderer UI, built from `fl-`-classed DOM (clean-room CSS gate). Each control runs a mark
+// Pure renderer UI, built from `fl-`-classed DOM (clean-implementation CSS gate). Each control runs a mark
 // command from `commands.ts` against the live view through `view.dispatch` (the single dispatch seam),
 // then returns focus to the editor so typing continues uninterrupted.
 //
@@ -183,7 +183,7 @@ export function createToolbar(getView: () => EditorView): Toolbar {
     group.appendChild(b);
     swatches.push({ color, node: b });
   }
-  // The F11 shortcut toggles highlight (default colour). The swatches are colour-only with no room for a label,
+  // The F11 shortcut toggles highlight (default colour). The swatches are colour-only with no space for a label,
   // so a gray "F11" hint after them mirrors the F-key sublabels on the other buttons.
   const highlightHint = elem("span", "fl-tool-hint");
   highlightHint.textContent = "F11";

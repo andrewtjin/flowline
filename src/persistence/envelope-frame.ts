@@ -26,6 +26,12 @@ const MAGIC = new Uint8Array([0x46, 0x4c, 0x4f, 0x57, 0x01]);
 const FORMAT_VERSION = 1;
 const PAYLOAD_KIND = "pm-json";
 
+// Decompression cap, single source of truth for BOTH codecs (node gunzip `maxOutputLength`, web stream bound). The
+// codec inflates UNTRUSTED file bytes BEFORE it can validate them, so a gzip-bomb `.fl` could OOM the app; 64 MB is
+// far beyond any real document, and exceeding it makes decompression throw → a typed BadPayload. Lives here (the
+// shared frame) so the two codecs cannot drift; envelope.ts re-exports it for tests that pin the cap.
+export const MAX_DOC_BYTES = 64 * 1024 * 1024;
+
 /** The decoded envelope header (re-exported from envelope.ts for back-compat). */
 export interface EnvelopeHeader {
   readonly formatVersion: number;
@@ -36,9 +42,9 @@ export interface EnvelopeHeader {
 }
 
 /** Compress a payload (gzip). Injected per-runtime: node `gzipSync` (sync) or the streams API (async). */
-export type Compress = (input: Uint8Array) => Uint8Array | Promise<Uint8Array>;
+type Compress = (input: Uint8Array) => Uint8Array | Promise<Uint8Array>;
 /** Decompress a gzip payload, throwing on a size-cap overrun / corrupt stream. Injected per-runtime. */
-export type Decompress = (input: Uint8Array) => Uint8Array | Promise<Uint8Array>;
+type Decompress = (input: Uint8Array) => Uint8Array | Promise<Uint8Array>;
 
 /**
  * Assemble the envelope bytes from a header + an ALREADY-compressed payload. Pure framing (no gzip here — the
@@ -140,6 +146,51 @@ export function parseFrame(bytes: Uint8Array, currentSchemaVersion: number): Fra
 }
 
 /**
+ * The PRE-compression head, shared by both codecs: a document JSON → the UTF-8 bytes to be gzipped. SYNC (no
+ * compression here — the caller applies its own sync/async gzip primitive). Centralised so the `JSON.stringify` +
+ * `TextEncoder` step cannot drift between node and web.
+ */
+export function encodePayloadBytes(docJson: unknown): Uint8Array {
+  return new TextEncoder().encode(JSON.stringify(docJson));
+}
+
+/**
+ * The POST-decompression tail, shared by both codecs: ALREADY-decompressed payload bytes → the validated, up-
+ * migrated `docJson`. SYNC (the caller did its own sync/async decompression first, then hands the bytes here), so
+ * the node codec keeps a synchronous decode API and the web codec just awaits before calling this.
+ *
+ * Error contract (identical to what both codecs had inline): a bad UTF-8 decode OR invalid JSON collapses to a
+ * single typed `BadPayload` ("File is corrupt (unreadable content)."). NOTE: a DECOMPRESSION failure (gzip-bomb cap
+ * overrun / corrupt stream) is the CALLER's responsibility to map to the same `BadPayload` — it happens before this
+ * tail. An older-schema payload is up-migrated to the current schema (a pure JSON transform; `newId` mints fresh
+ * blockIds — node `randomUUID`, web `crypto.randomUUID`). `document.ts` then validates the returned JSON.
+ */
+export function decodePayloadJson(
+  decompressed: Uint8Array,
+  headerSchemaVersion: number,
+  currentSchemaVersion: number,
+  newId: () => string,
+): unknown {
+  let payloadJson: string;
+  try {
+    payloadJson = new TextDecoder("utf-8", { fatal: true }).decode(decompressed);
+  } catch {
+    throw new EnvelopeError("BadPayload", "File is corrupt (unreadable content).");
+  }
+  let docJson: unknown;
+  try {
+    docJson = JSON.parse(payloadJson);
+  } catch {
+    throw new EnvelopeError("BadPayload", "File is corrupt (unreadable content).");
+  }
+  // Up-migrate an older-schema payload to the CURRENT schema (a pure JSON transform; document.ts then validates).
+  if (headerSchemaVersion < currentSchemaVersion) {
+    docJson = migrateDocJson(docJson, headerSchemaVersion, { newId });
+  }
+  return docJson;
+}
+
+/**
  * Encode a document JSON into envelope bytes. Pure framing + an INJECTED `compress`. Mirrors envelope.ts's encode
  * exactly except the gzip primitive is supplied by the caller, so node and web produce the same byte layout (the
  * gzip OS-stamp byte still differs across implementations, but decode is the contract — see envelope.ts).
@@ -151,8 +202,7 @@ export async function encodeEnvelopeWith(
   compress: Compress,
 ): Promise<Uint8Array> {
   const header = buildHeader(schemaVersion, appVersion);
-  const payloadJson = new TextEncoder().encode(JSON.stringify(docJson));
-  const compressed = await compress(payloadJson);
+  const compressed = await compress(encodePayloadBytes(docJson));
   return frameEnvelope(header, compressed);
 }
 
@@ -169,24 +219,15 @@ export async function decodeEnvelopeWith(
 ): Promise<{ header: EnvelopeHeader; docJson: unknown }> {
   const { header, rawPayload } = parseFrame(bytes, currentSchemaVersion);
 
-  // Payload → JSON. A gunzip overrun (size cap), a corrupt stream, a bad UTF-8 decode, or invalid JSON all
-  // collapse to a single typed BadPayload — the caller never sees an untyped throw.
-  let payloadJson: string;
+  // Decompress with the injected primitive. A gunzip overrun (size cap) or a corrupt stream rejects → map it to the
+  // same typed BadPayload the shared tail uses, so the caller never sees an untyped throw (this is the caller-owned
+  // half of decodePayloadJson's error contract). The decoded-bytes → validated JSON tail is the shared helper.
+  let decompressed: Uint8Array;
   try {
-    const bytesOut = header.compression === "gzip" ? await decompress(rawPayload) : rawPayload;
-    payloadJson = new TextDecoder("utf-8", { fatal: true }).decode(bytesOut);
+    decompressed = header.compression === "gzip" ? await decompress(rawPayload) : rawPayload;
   } catch {
     throw new EnvelopeError("BadPayload", "File is corrupt (unreadable content).");
   }
-  let docJson: unknown;
-  try {
-    docJson = JSON.parse(payloadJson);
-  } catch {
-    throw new EnvelopeError("BadPayload", "File is corrupt (unreadable content).");
-  }
-  // Up-migrate an older-schema payload to the CURRENT schema (a pure JSON transform; document.ts then validates).
-  if (header.schemaVersion < currentSchemaVersion) {
-    docJson = migrateDocJson(docJson, header.schemaVersion, { newId });
-  }
+  const docJson = decodePayloadJson(decompressed, header.schemaVersion, currentSchemaVersion, newId);
   return { header, docJson };
 }

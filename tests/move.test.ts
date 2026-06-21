@@ -1,7 +1,7 @@
 // move.test.ts — unit tests for moveBlock (reorder as destroy + recreate).
 //
-// The invariant under test: a reorder is modelled as DELETE the unit + RE-INSERT an identical unit
-// elsewhere, under the SAME blockId. So the recreated
+// The invariant under test: a reorder is modelled
+// as DELETE the unit + RE-INSERT an identical unit elsewhere, under the SAME blockId. So the recreated
 // block must be DEEP-EQUAL to the original — children, text, every mark WITH its position, hard_breaks —
 // and its blockId must be preserved, never re-minted. These tests assert `original.eq(recreated)` on a
 // deliberately rich block (highlight colour + emphasis + hard_break) so a shallow copy or a dropped mark

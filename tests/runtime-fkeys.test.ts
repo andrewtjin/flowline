@@ -14,7 +14,7 @@ describe("structural F-key bindings (E6/E11)", () => {
 
   it("keeps the heading + tag + analytic structural keys present", () => {
     // F4/F5/F6 (headings) and F7 (tag) and Mod-F7 (analytic) are factory-built commands (a fresh instance per
-    // call), so assert by presence/type; F8 is the only direct-command reference, asserted by identity above.
+    // call), so assert by existence/type; F8 is the only direct-command reference, asserted by reference equality above.
     for (const k of ["F4", "F5", "F6", "F7", "Mod-F7"]) {
       expect(typeof structuralKeyBindings[k]).toBe("function");
     }

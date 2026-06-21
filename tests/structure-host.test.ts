@@ -41,7 +41,7 @@ describe("StructureHost.structure", () => {
     expect(structureHost.structure.isUnitBoundary(schema.text("x"))).toBe(false);
     expect(structureHost.structure.isUnitBoundary(schema.nodes.hard_break.create())).toBe(false);
   });
-  it("newUnitId mints unique RFC-4122 v4 UUIDs (clean-room)", () => {
+  it("newUnitId mints unique RFC-4122 v4 UUIDs (clean implementation)", () => {
     const a = structureHost.structure.newUnitId();
     const b = structureHost.structure.newUnitId();
     expect(a).not.toBe(b);

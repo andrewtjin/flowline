@@ -1,14 +1,14 @@
 // normalizer.test.ts — unit tests for the STRUCTURAL absorb normalizer.
 //
-// The behaviour under test: a position/adjacency-sensitive, content-MUTATING, STRUCTURAL normalizer. Here
-// that is "a loose top-level non-empty `paragraph` immediately after a `card` is absorbed into that card's
-// `body`."
+// The invariant under test: a position/adjacency-sensitive, content-
+// MUTATING, STRUCTURAL normalizer. Here that is "a loose top-level non-empty `paragraph` immediately after a
+// `card` is absorbed into that card's `body`."
 //
 // The normalizer is NOT wired live: an earlier build folded a loose paragraph into the preceding card on
 // caret-leave via the editor's `appendTransaction`, but that live behaviour was removed as unwanted, so
 // `liveNormalize` / `absorbNormalizer` / `absorbNormalizerPlugin` are gone and the live-path tests with them.
-// What remains — and what these tests pin — is the deterministic FULL-DOC scan: the one-shot IMPORT-REPAIR
-// entry point the editor runs explicitly (never live):
+// What remains — and what these tests pin — is the deterministic FULL-DOC scan that is BOTH the target these
+// structural adversary tests attack AND the one-shot IMPORT-REPAIR entry point the editor runs explicitly (never live):
 //   - structural absorb (the contiguous run after a card → the card body), content-mutating
 //   - the absorbed paragraph keeps its blockId + content (relocation, not re-creation); empty / non-paragraph
 //     blocks are barriers; the rebuilt card is check()-valid (`paragraph+`)
@@ -88,7 +88,7 @@ describe("structural absorb (full-doc scan)", () => {
   });
 });
 
-describe("relocation: identity + content preserved, barriers, validity", () => {
+describe("relocation: blockId + content preserved, barriers, validity", () => {
   it("PRESERVES the absorbed paragraph's blockId AND inline content + marks (relocation, not re-creation)", () => {
     const rich = paragraph.create({ blockId: "P1" }, [
       schema.text("read "),
@@ -175,7 +175,7 @@ describe("full-doc scan touches every top-level block AND mutates (not an adjace
 });
 
 // ── no minting, no false positives ───────────────────────────────────────────────────────────────
-describe("identity and non-interference", () => {
+describe("blockId conservation and non-interference", () => {
   it("never mints a blockId — absorptions only RELOCATE (the id set is conserved)", () => {
     const before = mkDoc(aCard("C", "B0"), para("p1", "P1"), para("p2", "P2"));
     const beforeIds = new Set([...topIds(before), ...bodyIds(before)]);

@@ -36,7 +36,9 @@ function attrSig(attrs: Record<string, { default?: unknown }> | undefined): Attr
     }));
 }
 
-export function canonicalSchemaSpec(schema: Schema): string {
+// Internal to this module (only `fingerprint` is the public surface). Builds the deterministic, sorted
+// structural string that gets hashed; not exported because no consumer needs the raw spec, only its hash.
+function canonicalSchemaSpec(schema: Schema): string {
   const nodes: NodeSig[] = [];
   schema.spec.nodes.forEach((name, spec) => {
     nodes.push({

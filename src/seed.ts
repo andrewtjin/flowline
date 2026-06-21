@@ -1,6 +1,6 @@
 // seed.ts — the self-documenting demo speech (DEV-ONLY content for the editor preview + human gates).
 //
-// This is ORIGINAL, clean-room instructional copy: its purpose is to TEACH the editor's mechanics while
+// This is ORIGINAL, clean-implementation instructional copy: its purpose is to TEACH the editor's mechanics while
 // exercising every block type (heading + card + analytic + paragraph) and every mark (cite F8, underline F9,
 // emphasis F10, highlight F11, muted Mod-8, strong/bold Ctrl+B). The prose is the author's own wording — it
 // deliberately does NOT reproduce any third-party tutorial text. Never the app's default doc.

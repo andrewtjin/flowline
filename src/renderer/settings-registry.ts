@@ -6,7 +6,7 @@
 // Keeping the contract here means the DOM shell and the boot wiring depend on this interface, never on the
 // internal Maps — and a test can exercise the registries without constructing a single element.
 //
-// CLEAN-ROOM / PURITY: nothing here ever touches the ProseMirror doc. Theme state lives ONLY on
+// CLEAN-IMPLEMENTATION / PURITY: nothing here ever touches the ProseMirror doc. Theme state lives ONLY on
 // document.documentElement.dataset.theme + localStorage[THEME_STORAGE_KEY]; it is per-user chrome, never
 // document content (case S-003 / E7-F2). No `--fl-color-*` highlight var is referenced here.
 
@@ -80,8 +80,8 @@ export interface ThemeDef {
  */
 export const THEME_STORAGE_KEY = "flowline.theme";
 
-/** The minimal storage surface we need: window.localStorage in the app; an injected fake in tests. A small
- *  `KV`-style surface, plus removeItem (clearing a theme deletes the key rather than storing ""). */
+/** The minimal storage surface we need: window.localStorage in the app; an injected fake in tests. Mirrors the
+ *  shared `KV` storage convention, plus removeItem (clearing a theme deletes the key rather than storing ""). */
 type ThemeStore = Pick<Storage, "getItem" | "setItem" | "removeItem">;
 
 /**

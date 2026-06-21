@@ -31,7 +31,7 @@ afterEach(() => {
 });
 
 describe("in-renderer menu bar (E10)", () => {
-  it("renders the four top-level menus in order", () => {
+  it("renders the four top-level menus", () => {
     const { dom } = mount({ dispatch: vi.fn() });
     expect(titlesOf(dom)).toEqual(["File", "Edit", "View", "Window"]);
   });
@@ -68,7 +68,11 @@ describe("in-renderer menu bar (E10)", () => {
     pick(1, "Undo"); // Edit
     pick(2, "Toggle Sidebar"); // View
     pick(3, "Close"); // Window
-    expect(dispatch.mock.calls.map((c) => c[0])).toEqual(["edit:undo", "view:toggleSidebar", "window:close"]);
+    expect(dispatch.mock.calls.map((c) => c[0])).toEqual([
+      "edit:undo",
+      "view:toggleSidebar",
+      "window:close",
+    ]);
   });
 
   it("closes the open dropdown on Escape", () => {

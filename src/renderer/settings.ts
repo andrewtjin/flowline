@@ -1,11 +1,14 @@
 // renderer/settings.ts — the DOM shell for Settings + the SHARED single-instance overlay primitive.
 //
-// WHY THIS EXISTS: Settings needs a modal overlay — a dim full-screen backdrop, a centered dialog, an
-// Escape/backdrop-click dismiss, a focus keytrap, and a "only one open at a time" latch. This module owns that
-// overlay primitive (`openOverlay`) behind ONE module-level latch, so two overlays can never stack: opening one
-// while another is already up is a graceful no-op (E7-S3).
+// WHY THIS EXISTS: another modal (main.ts `createModal`) already owns a perfectly good overlay scaffold
+// — a dim full-screen backdrop, a centered dialog, an Escape/backdrop-click dismiss, a focus keytrap, and a
+// "only one open at a time" latch. Settings needs the SAME chrome. Rather than clone it (two latches that could
+// each open while the other is up — Settings stacking over the other modal), this module extracts the overlay
+// primitive (`openOverlay`) with ONE module-level latch, and main.ts routes its `createModal` through the same
+// latch. The result: Settings and the other modal can NEVER stack — opening either while one is open is a
+// graceful no-op (E7-S3).
 //
-// CLEAN-ROOM / PURITY: this shell paints chrome and calls into the PURE settings-registry (sections + themes +
+// CLEAN-IMPLEMENTATION / PURITY: this shell paints chrome and calls into the PURE settings-registry (sections + themes +
 // applyTheme). It never touches the ProseMirror doc — theme state lives on documentElement.dataset + localStorage
 // only (S-003 / E7-F2). Every class is `fl-` prefixed (`.fl-settings*`, plus the shared `.fl-overlay*`).
 
@@ -39,8 +42,8 @@ export function closeOverlay(): void {
  * call `close` to dismiss; `build` returns the list of focusable controls (in tab order) so Tab/Shift-Tab cycle
  * within the dialog and the first is auto-focused.
  *
- * Returns true if the overlay opened, false if one was already open (graceful no-stack). The single
- * `activeOverlay` latch guarantees two overlays can never coexist.
+ * Returns true if the overlay opened, false if one was already open (graceful no-stack). Because the SAME
+ * `activeOverlay` latch backs both this and main.ts's modal, Settings and the Join modal can never coexist.
  */
 export function openOverlay(
   build: (dialog: HTMLElement, close: () => void) => HTMLElement[],
@@ -102,8 +105,8 @@ export function settingsRegistries(): { sections: SectionRegistry; themes: Theme
 }
 
 /**
- * Open the Settings overlay (single-instance, via the shared latch). Opening while ANY overlay is already up
- * is a graceful no-op (returns false).
+ * Open the Settings overlay (single-instance, via the shared latch). Opening while ANY overlay (Settings or the
+ * Join modal) is already up is a graceful no-op (returns false).
  *
  * Layout (user 2026-06-19, "don't make two panes"): ONE combined page — every registered section is stacked
  * vertically into a single scrollable body, each rendering its own labeled field group (e.g. "Theme", then

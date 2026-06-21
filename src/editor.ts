@@ -2,8 +2,8 @@
 //
 // There is ONE EditorView and ONE place transactions are applied — the `dispatchTransaction`
 // callback below. Every command and (later) the normalizer funnel through it; there is no second
-// dispatch path and no out-of-band state injection elsewhere. This is the single extension point for
-// wrapping dispatch, which is why it is a single named function.
+// dispatch path and no out-of-band state injection elsewhere. Concentrating all transactions in
+// THIS seam is why it is a single named function: any wrapper can intercept transactions in one place.
 //
 // The view is built with NO `nodeViews`. All rendering flows through the schema's toDOM.
 // `buildViewProps` deliberately omits the key; the no-NodeViews test asserts it stays omitted.
@@ -15,7 +15,7 @@ import type { DirectEditorProps } from "prosemirror-view";
 import type { Node as PMNode } from "prosemirror-model";
 import { schema } from "./schema";
 
-/** The single dispatch seam. This is the single extension point for wrapping dispatch. */
+/** The single dispatch seam — the one function any transaction wrapper hooks. */
 export type DispatchSeam = (view: EditorView, tr: Transaction) => void;
 
 /**

@@ -35,7 +35,7 @@ import { pasteGuardPlugin } from "../paste-guard";
 
 /**
  * Click-below-content plugin. When the user mousedowns in the empty area BELOW the last rendered
- * block (still inside the editor; the .ProseMirror box has padding-bottom so there is room to click), drop
+ * block (still inside the editor; the .ProseMirror box has padding-bottom so there is space to click), drop
  * the caret at the END of the document and focus the editor. Detection is pure DOM geometry: a click whose
  * clientY sits below the bottom edge of the editor's LAST element child is "below all content".
  *

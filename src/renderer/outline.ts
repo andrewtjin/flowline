@@ -8,7 +8,7 @@
 //
 // INVARIANTS folded in:
 //   - Outline entries are ALWAYS keyed by the TOP-LEVEL block's blockId (never a card-body paragraph id),
-//     and resolveBlockPos walks top-level blocks first-match-wins (tolerates duplicate ids), mirroring
+//     and resolveBlockPos walks top-level blocks first-match-wins (tolerates CRDT duplicate ids), mirroring
 //     moveBlock's walk (commands.ts ~1023). The click handler NO-OPs when resolveBlockPos returns null.
 //   - docIsEmpty is EXACTLY newDoc()'s shape (one child, a paragraph, empty content). NOT childCount===0,
 //     NOT a whitespace test on a multi-block doc. isReusable layers dirty/path on top of it.
@@ -85,8 +85,8 @@ export function buildOutline(doc: PMNode): OutlineEntry[] {
 // (the position a caller passes to `doc.resolve(pos)` + `TextSelection.near` to scroll it into view through the
 // existing seam). Returns null when no top-level block carries the id.
 //
-// FIRST-MATCH-WINS: a duplicate blockId can surface (e.g. from an imported document); taking the first
-// occurrence keeps navigation deterministic, mirroring moveBlock's walk (commands.ts ~1023). Only TOP-LEVEL blocks are
+// FIRST-MATCH-WINS: the CRDT merge layer can surface a duplicate blockId; taking the first occurrence
+// keeps navigation deterministic, mirroring moveBlock's walk (commands.ts ~1023). Only TOP-LEVEL blocks are
 // considered — a card-body paragraph id will never match here (it is not a top-level block), which is correct
 // because OutlineEntry.blockId is always a top-level id.
 export function resolveBlockPos(doc: PMNode, blockId: string): number | null {

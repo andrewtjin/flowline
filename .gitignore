@@ -5,7 +5,13 @@ out/
 .vite/
 *.tsbuildinfo
 
-# local scratch (never tracked)
+# collab server persistence + e2e (Playwright) artifacts
+.collab-data/
+test-results/
+playwright-report/
+.playwright/
+
+# planning / orchestration scratch (AI-invisibility: never tracked in the shipped product)
 tasks/
 
 # misc

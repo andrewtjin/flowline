@@ -4,19 +4,17 @@
 // desktop app. The browser dev preview and the web build have NO menu at all, so those actions are invisible and
 // undiscoverable there. This renders the SAME command vocabulary as a themeable DOM menu bar in the topbar,
 // dispatching through the one `MenuCommand` seam the renderer already owns (dispatchMenuCommand in main.ts). On
-// desktop the native menu bar is auto-hidden (main/index.ts), so this DOM bar is the single VISIBLE menu while
-// the native accelerators (Ctrl+N/S/W…) keep firing.
+// desktop the native menu bar is auto-hidden (main/index.ts), so this DOM bar is the single VISIBLE menu while the
+// native accelerators (Ctrl+N/S/W…) keep firing.
 //
 // It is pure presentation: it knows nothing about what a command DOES — it only emits MenuCommands to the host.
-// Clean-room: every class is `fl-` prefixed. No schema, no document state.
+// Clean implementation: every class is `fl-` prefixed. No schema, no document state.
 
 import type { MenuCommand } from "../persistence/bridge";
 
 export interface MenuBar {
   /** The menu-bar root element — the caller mounts it (e.g. after the topbar brand). */
   readonly dom: HTMLElement;
-  /** Close any open dropdown — call when the host opens a modal or otherwise needs the menu dismissed. */
-  closeAll(): void;
   /** Remove the document-level listeners. Not needed in normal use (one bar per window, window-lifetime), but makes
    *  the bar safely disposable for HMR / tests / any future site that builds more than one bar in a document. */
   destroy(): void;
@@ -45,7 +43,7 @@ const SEP: MenuRow = { kind: "separator" };
 const IS_MAC = typeof navigator !== "undefined" && /Mac/i.test(navigator.userAgent);
 const MOD = IS_MAC ? "⌘" : "Ctrl";
 
-// The menu structure: File / Edit / View / Window.
+// The menu structure.
 function menuDefs(): MenuDef[] {
   return [
     {
@@ -195,5 +193,5 @@ export function createMenuBar(opts: { dispatch: (cmd: MenuCommand) => void }): M
     closeAll();
     ac.abort();
   };
-  return { dom, closeAll, destroy };
+  return { dom, destroy };
 }

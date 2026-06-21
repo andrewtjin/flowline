@@ -213,10 +213,10 @@ describe("conformance — accepts well-formed, REJECTS malformed", () => {
   });
 });
 
-// The excludes pair behaves differently for LOCAL edits vs a state assembled from an external source.
-// A normalizer must reconcile a transient both-marks doc BEFORE it is validated, because check() rejects the
-// both-marks state that fromJSON tolerates.
-describe("emphasis<->muted excludes — local vs externally-assembled", () => {
+// The excludes pair behaves differently for LOCAL edits vs a MERGED state.
+// This pins the invariant: a merged doc must be normalized BEFORE it
+// validates, because check() rejects the transient both-marks state that fromJSON tolerates.
+describe("emphasis<->muted excludes — local vs merged", () => {
   it("local editing cannot put both on one char (addToSet evicts the excluded mark)", () => {
     const set = schema.marks.muted.create().addToSet(schema.marks.emphasis.create().addToSet([]));
     expect(set.map((m) => m.type.name)).toEqual(["muted"]); // last applied wins
